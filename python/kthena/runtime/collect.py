@@ -45,11 +45,11 @@ class MetricAdapter(Collector):
                     metrics.append(processed_metric)
                     
         except ValueError as e:
-            logger.error(f"Invalid metric text format: {e}")
-            raise ValueError(f"Failed to parse metric text: {e}")
+            logger.error("Invalid metric text format: %s", e)
+            raise ValueError(f"Failed to parse metric text: {e}") from e 
         except Exception as e:
-            logger.error(f"Unexpected error processing metrics: {e}")
-            raise RuntimeError(f"Failed to initialize MetricAdapter: {e}")
+            logger.error("Unexpected error processing metrics: %s", e)
+            raise RuntimeError(f"Failed to initialize MetricAdapter: {e}")from e
             
         return metrics
 
