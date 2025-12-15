@@ -83,5 +83,5 @@ fi
 echo "E2E setup completed successfully"
 echo "Cluster: ${CLUSTER_NAME}"
 echo "KUBECONFIG: /tmp/kubeconfig-e2e"
-echo "Router service is available at localhost:8080"
+echo "Router service is available at localhost:80"
 echo "Port-forward PID: ${PORT_FORWARD_PID} (saved to /tmp/port-forward.pid)"
