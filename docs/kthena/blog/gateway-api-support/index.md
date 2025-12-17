@@ -89,7 +89,7 @@ This flexibility allows users to select the approach that best fits their specif
 
 Before enabling Gateway API support, ensure you have:
 
-- Kubernetes cluster with Kthena installed (see [Installation Guide](../../docs/getting-started/installation.md))
+- Kubernetes cluster with Kthena installed (see [Installation Guide](/docs/getting-started/installation))
 - Basic understanding of Kubernetes Gateway API concepts
 - `kubectl` configured to access your cluster
 
@@ -325,7 +325,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extens
 
 ### Step 2: Deploy Sample Model Server
 
-Deploy a model that will serve as the backend for the Gateway Inference Extension. Follow the [Quick Start](../../docs/getting-started/quick-start.md) guide to deploy a model in the `default` namespace and ensure it's in `Active` state.
+Deploy a model that will serve as the backend for the Gateway Inference Extension. Follow the [Quick Start](/docs/getting-started/quick-start) guide to deploy a model in the `default` namespace and ensure it's in `Active` state.
 
 After deployment, identify the labels of your model pods:
 
@@ -529,4 +529,4 @@ Users can choose between:
 
 Both approaches are fully supported and can be used together in the same cluster, providing maximum flexibility for different use cases and requirements.
 
-For more information, please refer to the [Gateway API Support Guide](../../docs/user-guide/gateway-api-support.md) and [Gateway Inference Extension Support Guide](../../docs/user-guide/gateway-inference-extension-support.md). All example files referenced in this blog are available in the [kthena/examples/kthena-router](https://github.com/volcano-sh/kthena/tree/main/examples/kthena-router) directory.
+For more information, please refer to the [Gateway API Support Guide](/docs/user-guide/gateway-api-support) and [Gateway Inference Extension Support Guide](/docs/user-guide/gateway-inference-extension-support). All example files referenced in this blog are available in the [kthena/examples/kthena-router](https://github.com/volcano-sh/kthena/tree/main/examples/kthena-router) directory.
