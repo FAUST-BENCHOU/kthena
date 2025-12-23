@@ -27,8 +27,8 @@ import (
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	inferencev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 var (
@@ -94,49 +94,38 @@ func TestGatewayInferenceExtension(t *testing.T) {
 
 	// 1. Deploy InferencePool
 	t.Log("Deploying InferencePool...")
-	inferencePoolGVR := schema.GroupVersionResource{
-		Group:    "inference.networking.k8s.io",
-		Version:  "v1",
-		Resource: "inferencepools",
-	}
+	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool]("examples/kthena-router/InferencePool.yaml")
+	inferencePool.Namespace = testNamespace
 
-	inferencePoolRaw := utils.LoadYAMLFromFile[unstructured.Unstructured]("examples/kthena-router/InferencePool.yaml")
-	inferencePoolRaw.SetNamespace(testNamespace)
-
-	_, err := testCtx.DynamicClient.Resource(inferencePoolGVR).Namespace(testNamespace).Create(ctx, inferencePoolRaw, metav1.CreateOptions{})
+	createdInferencePool, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create InferencePool")
 
 	t.Cleanup(func() {
-		_ = testCtx.DynamicClient.Resource(inferencePoolGVR).Namespace(testNamespace).Delete(context.Background(), inferencePoolRaw.GetName(), metav1.DeleteOptions{})
+		if err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Delete(context.Background(), createdInferencePool.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete InferencePool %s/%s: %v", testNamespace, createdInferencePool.Name, err)
+		}
 	})
 
 	// 2. Deploy HTTPRoute
 	t.Log("Deploying HTTPRoute...")
-	httpRouteGVR := schema.GroupVersionResource{
-		Group:    "gateway.networking.k8s.io",
-		Version:  "v1",
-		Resource: "httproutes",
-	}
+	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("examples/kthena-router/HTTPRoute.yaml")
+	httpRoute.Namespace = testNamespace
 
-	httpRouteRaw := utils.LoadYAMLFromFile[unstructured.Unstructured]("examples/kthena-router/HTTPRoute.yaml")
-	httpRouteRaw.SetNamespace(testNamespace)
-
-	// Update parentRefs in unstructured to point to the kthena installation namespace
-	parentRefs, found, err := unstructured.NestedSlice(httpRouteRaw.Object, "spec", "parentRefs")
-	if err == nil && found {
-		for i := range parentRefs {
-			if ref, ok := parentRefs[i].(map[string]interface{}); ok {
-				ref["namespace"] = kthenaNamespace
-			}
+	// Update parentRefs to point to the kthena installation namespace
+	ktNamespace := gatewayv1.Namespace(kthenaNamespace)
+	if len(httpRoute.Spec.ParentRefs) > 0 {
+		for i := range httpRoute.Spec.ParentRefs {
+			httpRoute.Spec.ParentRefs[i].Namespace = &ktNamespace
 		}
-		_ = unstructured.SetNestedSlice(httpRouteRaw.Object, parentRefs, "spec", "parentRefs")
 	}
 
-	_, err = testCtx.DynamicClient.Resource(httpRouteGVR).Namespace(testNamespace).Create(ctx, httpRouteRaw, metav1.CreateOptions{})
+	createdHTTPRoute, err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Create(ctx, httpRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create HTTPRoute")
 
 	t.Cleanup(func() {
-		_ = testCtx.DynamicClient.Resource(httpRouteGVR).Namespace(testNamespace).Delete(context.Background(), httpRouteRaw.GetName(), metav1.DeleteOptions{})
+		if err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Delete(context.Background(), createdHTTPRoute.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete HTTPRoute %s/%s: %v", testNamespace, createdHTTPRoute.Name, err)
+		}
 	})
 
 	// 3. Test accessing the route
@@ -145,13 +134,5 @@ func TestGatewayInferenceExtension(t *testing.T) {
 		utils.NewChatMessage("user", "Hello GIE"),
 	}
 
-	// The model name in HTTPRoute.yaml is not explicitly defined in the route itself usually,
-	// but kthena-router matches by model name if it's a /v1/chat/completions request.
-	// In HTTPRoute.yaml, it matches path / and sends to InferencePool deepseek-r1-1-5b.
-	// If the request path is /v1/chat/completions, and the route matches /, it will be used.
-
-	// However, we need to know what model name to use.
-	// The InferencePool name is deepseek-r1-1-5b.
-	// The mock deployments also use this name.
 	utils.CheckChatCompletions(t, "deepseek-r1-1-5b", messages)
 }

@@ -29,8 +29,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	inferenceclientset "sigs.k8s.io/gateway-api-inference-extension/client-go/clientset/versioned"
+	gatewayclientset "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 )
 
 const (
@@ -42,10 +43,11 @@ const (
 
 // RouterTestContext holds the clients needed for router tests
 type RouterTestContext struct {
-	KubeClient    *kubernetes.Clientset
-	KthenaClient  *clientset.Clientset
-	DynamicClient dynamic.Interface
-	Namespace     string
+	KubeClient      *kubernetes.Clientset
+	KthenaClient    *clientset.Clientset
+	GatewayClient   *gatewayclientset.Clientset
+	InferenceClient *inferenceclientset.Clientset
+	Namespace       string
 }
 
 // NewRouterTestContext creates a new RouterTestContext
@@ -62,16 +64,21 @@ func NewRouterTestContext(namespace string) (*RouterTestContext, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kthena client: %w", err)
 	}
-	dynamicClient, err := dynamic.NewForConfig(config)
+	gatewayClient, err := gatewayclientset.NewForConfig(config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+		return nil, fmt.Errorf("failed to create Gateway client: %w", err)
+	}
+	inferenceClient, err := inferenceclientset.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Inference client: %w", err)
 	}
 
 	return &RouterTestContext{
-		KubeClient:    kubeClient,
-		KthenaClient:  kthenaClient,
-		DynamicClient: dynamicClient,
-		Namespace:     namespace,
+		KubeClient:      kubeClient,
+		KthenaClient:    kthenaClient,
+		GatewayClient:   gatewayClient,
+		InferenceClient: inferenceClient,
+		Namespace:       namespace,
 	}, nil
 }
 
@@ -177,12 +184,20 @@ func (c *RouterTestContext) CleanupCommonComponents() error {
 	fmt.Printf("Cleaning up common components in namespace: %s\n", c.Namespace)
 
 	// Delete ModelServers
-	_ = c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Delete(ctx, ModelServer1_5bName, metav1.DeleteOptions{})
-	_ = c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Delete(ctx, ModelServer7bName, metav1.DeleteOptions{})
+	if err := c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Delete(ctx, ModelServer1_5bName, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("failed to delete ModelServer DS1.5B: %w", err)
+	}
+	if err := c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Delete(ctx, ModelServer7bName, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("failed to delete ModelServer DS7B: %w", err)
+	}
 
 	// Delete Deployments
-	_ = c.KubeClient.AppsV1().Deployments(c.Namespace).Delete(ctx, Deployment1_5bName, metav1.DeleteOptions{})
-	_ = c.KubeClient.AppsV1().Deployments(c.Namespace).Delete(ctx, Deployment7bName, metav1.DeleteOptions{})
+	if err := c.KubeClient.AppsV1().Deployments(c.Namespace).Delete(ctx, Deployment1_5bName, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("failed to delete DS1.5B Deployment: %w", err)
+	}
+	if err := c.KubeClient.AppsV1().Deployments(c.Namespace).Delete(ctx, Deployment7bName, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("failed to delete DS7B Deployment: %w", err)
+	}
 
 	fmt.Println("Common components cleanup completed")
 	return nil
