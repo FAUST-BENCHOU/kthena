@@ -71,9 +71,6 @@ func CheckChatCompletionsWithHeaders(t *testing.T, modelName string, messages []
 	return CheckChatCompletionsWithURLAndHeaders(t, DefaultRouterURL, modelName, messages, headers)
 }
 
-// CheckChatCompletionsWithURLAndHeaders sends a chat completions request to the specified URL with custom headers.
-// It retries with exponential backoff if the request fails or returns a non-200 status code.
-// This is the core implementation that all other CheckChatCompletions* functions delegate to.
 func CheckChatCompletionsWithURLAndHeaders(t *testing.T, url string, modelName string, messages []ChatMessage, headers map[string]string) *ChatCompletionsResponse {
 	requestBody := ChatCompletionsRequest{
 		Model:    modelName,
