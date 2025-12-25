@@ -236,3 +236,9 @@ npm run docusaurus docs:version v0.2.0
 ```
 
 Please refer to [this guide](https://tutorial.docusaurus.io/docs/tutorial-extras/manage-docs-versions/) for more information.
+
+## Using Algolia DocSearch
+
+Docusaurus has official support for [Algolia DocSearch](https://docsearch.algolia.com/).
+
+Please refer to the [Docusaurus Search Documentation](https://docusaurus.io/docs/search#using-algolia-docsearch)  for more details.
