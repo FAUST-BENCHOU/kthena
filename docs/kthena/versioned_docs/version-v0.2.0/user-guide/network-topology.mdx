@@ -7,7 +7,7 @@ In distributed AI inference, communication latency between nodes directly affect
 
 ## Overview
 
-kthena leverages Volcano to achieve network topology-aware scheduling. To shield the differences in data center network types, Volcano defines a new CRD HyperNode to represent the network topology, providing a standardized API interface. A HyperNode represents a network topology performance domain, typically mapped to a switch or tor. Multiple HyperNodes are connected hierarchically to form a tree structure. For example, the following diagram shows a network topology composed of multiple HyperNodes:
+Kthena leverages Volcano to achieve network topology-aware scheduling. To shield the differences in data center network types, Volcano defines a new CRD HyperNode to represent the network topology, providing a standardized API interface. A HyperNode represents a network topology performance domain, typically mapped to a switch or tor. Multiple HyperNodes are connected hierarchically to form a tree structure. For example, the following diagram shows a network topology composed of multiple HyperNodes:
 
 <div style={{ textAlign: 'center' }}>
     <LightboxImage src={networkTopologySvg} alt="Network Topology" />
