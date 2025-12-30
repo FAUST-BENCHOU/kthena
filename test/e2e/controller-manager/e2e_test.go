@@ -144,7 +144,7 @@ func TestAutoscalingPolicyMutation(t *testing.T) {
 	assert.NotNil(t, created.Spec.Behavior.ScaleUp)
 	// Check specific default values (based on mutator logic)
 	if created.Spec.Behavior.ScaleDown.StabilizationWindow != nil {
-		assert.Equal(t, "5m", created.Spec.Behavior.ScaleDown.StabilizationWindow.Duration.String())
+		assert.Equal(t, 5*time.Minute, created.Spec.Behavior.ScaleDown.StabilizationWindow.Duration)
 	}
 	t.Logf("Created AutoscalingPolicy with defaults: %s/%s", created.Namespace, created.Name)
 }
