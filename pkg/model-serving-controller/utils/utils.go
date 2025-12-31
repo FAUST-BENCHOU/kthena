@@ -234,9 +234,10 @@ func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, 
 				newModelServingOwnerRef(mi),
 			},
 			Labels: map[string]string{
-				workloadv1alpha1.GroupNameLabelKey: groupName,
-				workloadv1alpha1.RoleLabelKey:      roleLabel,
-				workloadv1alpha1.RoleIDKey:         GenerateRoleID(roleLabel, roleIndex),
+				workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleLabel,
+				workloadv1alpha1.RoleIDKey:                GenerateRoleID(roleLabel, roleIndex),
 			},
 		},
 		Spec: corev1.ServiceSpec{

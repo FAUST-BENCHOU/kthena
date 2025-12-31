@@ -151,6 +151,12 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		},
 	})
 
+	_, _ = c.servicesInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		DeleteFunc: func(obj interface{}) {
+			c.deleteService(obj)
+		},
+	})
+
 	c.syncHandler = c.syncModelServing
 
 	return c, nil
@@ -337,6 +343,49 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	}
 }
 
+func (c *ModelServingController) deleteService(obj interface{}) {
+	svc, ok := obj.(*corev1.Service)
+	if !ok {
+		// If the object is not a Service, it might be a tombstone object.
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			klog.Error("failed to parse service type when deleteService")
+			return
+		}
+		svc, ok = tombstone.Obj.(*corev1.Service)
+		if !ok {
+			klog.Errorf("failed to parse Service from tombstone %#v", tombstone.Obj)
+			return
+		}
+	}
+
+	if svc.GetLabels() == nil {
+		// This service is not created by ModelServing controller
+		return
+	}
+
+	labelKeys := map[string]string{
+		workloadv1alpha1.ModelServingNameLabelKey: "",
+		workloadv1alpha1.GroupNameLabelKey:        "",
+		workloadv1alpha1.RoleLabelKey:             "",
+		workloadv1alpha1.RoleIDKey:                "",
+	}
+
+	for k := range labelKeys {
+		if _, ok := svc.GetLabels()[k]; !ok {
+			// This service is not created by ModelServing controller
+			return
+		} else {
+			labelKeys[k] = svc.GetLabels()[k]
+		}
+	}
+
+	klog.V(4).Infof("Service %s/%s deleted, enqueuing ModelServing %s for reconcile", svc.GetNamespace(), svc.GetName(), labelKeys[workloadv1alpha1.ModelServingNameLabelKey])
+
+	miKey := fmt.Sprintf("%s/%s", svc.GetNamespace(), labelKeys[workloadv1alpha1.ModelServingNameLabelKey])
+	c.workqueue.Add(miKey)
+}
+
 func (c *ModelServingController) enqueueModelServing(mi *workloadv1alpha1.ModelServing) {
 	var key string
 	var err error
@@ -385,6 +434,10 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	}
 	if err != nil {
 		return err
+	}
+
+	if err := c.managerHeadlessService(ctx, mi); err != nil {
+		return fmt.Errorf("cannot manage ModelServing: %v", err)
 	}
 
 	// only fields in roles can be modified in rolling updates.
@@ -1127,6 +1180,44 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi 
 	}
 	if len(err) > 0 {
 		return errors.Join(err...)
+	}
+
+	return nil
+}
+
+func (c *ModelServingController) managerHeadlessService(ctx context.Context, mi *workloadv1alpha1.ModelServing) error {
+	servingGroups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
+	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
+		return fmt.Errorf("cannot get servingGroups: %v", err)
+	}
+
+	for _, sg := range servingGroups {
+		for _, role := range mi.Spec.Template.Roles {
+			roleList, err := c.store.GetRoleList(utils.GetNamespaceName(mi), sg.Name, role.Name)
+			if err != nil {
+				continue
+			}
+
+			for _, roleObj := range roleList {
+				serviceSelector := map[string]string{
+					workloadv1alpha1.GroupNameLabelKey: sg.Name,
+					workloadv1alpha1.RoleLabelKey:      role.Name,
+					workloadv1alpha1.RoleIDKey:         roleObj.Name,
+				}
+
+				services, err := c.getServicesByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", mi.Namespace, sg.Name, role.Name, roleObj.Name))
+				if err != nil {
+					continue
+				}
+
+				if len(services) == 0 && role.WorkerTemplate != nil {
+					_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
+					if err := utils.CreateHeadlessService(ctx, c.kubeClientSet, mi, serviceSelector, sg.Name, role.Name, roleIndex); err != nil {
+						klog.Errorf("failed to recreate service for role %s in serving group %s: %v", roleObj.Name, sg.Name, err)
+					}
+				}
+			}
+		}
 	}
 
 	return nil

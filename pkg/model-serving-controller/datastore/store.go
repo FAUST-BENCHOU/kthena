@@ -44,6 +44,7 @@ type Store interface {
 	AddRunningPodToServingGroup(modelServingName types.NamespacedName, groupName, pod, revision, roleName, roleID string)
 	DeleteRunningPodFromServingGroup(modelServingName types.NamespacedName, groupName string, pod string)
 	UpdateServingGroupStatus(modelServingName types.NamespacedName, groupName string, Status ServingGroupStatus) error
+	UpdateStatusWhenDeleteModelServing(modelServingName types.NamespacedName) error
 }
 
 type store struct {
@@ -400,5 +401,26 @@ func (s *store) UpdateServingGroupStatus(modelServingName types.NamespacedName, 
 	} else {
 		return fmt.Errorf("failed to find ServingGroup %s in modelServing %s", groupName, modelServingName.Namespace+"/"+modelServingName.Name)
 	}
+	return nil
+}
+
+func (s *store) UpdateStatusWhenDeleteModelServing(modelServingName types.NamespacedName) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	groups, ok := s.servingGroup[modelServingName]
+	if !ok {
+		return fmt.Errorf("failed to find modelServing %s", modelServingName.Namespace+"/"+modelServingName.Name)
+	}
+
+	for _, group := range groups {
+		for roleName := range group.roles {
+			for roleID := range group.roles[roleName] {
+				group.roles[roleName][roleID].Status = RoleDeleting
+			}
+		}
+		group.Status = ServingGroupDeleting
+	}
+
 	return nil
 }
