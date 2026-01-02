@@ -17597,6 +17597,11 @@ spec:
                   by the ModelServing controller from the ModelServing version
                 format: int32
                 type: integer
+              currentRevision:
+                description: |-
+                  CurrentRevision indicates the version of the ModelServing template used to generate ServingGroups
+                  that are not being updated.
+                type: string
               labelSelector:
                 description: LabelSelector is a label query over pods that should
                   match the replica count.
@@ -17612,6 +17617,11 @@ spec:
                   have been created (updated or not, ready or not)
                 format: int32
                 type: integer
+              updateRevision:
+                description: |-
+                  UpdateRevision indicates the version of the ModelServing template used to generate ServingGroups
+                  that are being updated.
+                type: string
               updatedReplicas:
                 description: UpdatedReplicas track the number of ServingGroup that
                   have been updated (ready or not).

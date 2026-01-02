@@ -166,6 +166,16 @@ type ModelServingStatus struct {
 	// AvailableReplicas track the number of ServingGroup that are in ready state (updated or not).
 	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
 
+	// CurrentRevision indicates the version of the ModelServing template used to generate ServingGroups
+	// that are not being updated.
+	// +optional
+	CurrentRevision string `json:"currentRevision,omitempty"`
+
+	// UpdateRevision indicates the version of the ModelServing template used to generate ServingGroups
+	// that are being updated.
+	// +optional
+	UpdateRevision string `json:"updateRevision,omitempty"`
+
 	// Conditions track the condition of the ModelServing.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 

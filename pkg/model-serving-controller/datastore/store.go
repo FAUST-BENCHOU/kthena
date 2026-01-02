@@ -246,6 +246,8 @@ func (s *store) DeleteModelServing(modelServingName types.NamespacedName) {
 }
 
 // DeleteServingGroup delete ServingGroup in map
+// Note: Revision history should be recorded using ControllerRevision before calling this method
+// to ensure it's captured even if the deletion process fails.
 func (s *store) DeleteServingGroup(modelServingName types.NamespacedName, groupName string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()

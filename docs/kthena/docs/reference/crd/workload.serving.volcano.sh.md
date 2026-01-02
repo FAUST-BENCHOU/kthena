@@ -527,6 +527,8 @@ _Appears in:_
 | `currentReplicas` _integer_ | CurrentReplicas is the number of ServingGroup created by the ModelServing controller from the ModelServing version |  |  |
 | `updatedReplicas` _integer_ | UpdatedReplicas track the number of ServingGroup that have been updated (ready or not). |  |  |
 | `availableReplicas` _integer_ | AvailableReplicas track the number of ServingGroup that are in ready state (updated or not). |  |  |
+| `currentRevision` _string_ | CurrentRevision indicates the version of the ModelServing template used to generate ServingGroups<br />that are not being updated. |  |  |
+| `updateRevision` _string_ | UpdateRevision indicates the version of the ModelServing template used to generate ServingGroups<br />that are being updated. |  |  |
 | `labelSelector` _string_ | LabelSelector is a label query over pods that should match the replica count. |  |  |
 
 

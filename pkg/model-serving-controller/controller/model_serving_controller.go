@@ -224,6 +224,7 @@ func (c *ModelServingController) deleteModelServing(obj interface{}) {
 		Namespace: mi.Namespace,
 		Name:      mi.Name,
 	})
+	// ControllerRevisions will be automatically deleted via OwnerReference when ModelServing is deleted
 }
 
 func (c *ModelServingController) addPod(obj interface{}) {
@@ -456,6 +457,12 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return fmt.Errorf("failed to update status of mi %s/%s: %v", namespace, name, err)
 	}
 
+	// Periodically clean up old ControllerRevisions (keep only the most recent MaxRevisionHistory per ordinal)
+	// This is done on every sync to ensure we don't accumulate too many revisions
+	if err := utils.CleanupOldControllerRevisions(ctx, c.kubeClientSet, mi); err != nil {
+		klog.Warningf("Failed to cleanup old ControllerRevisions for ModelServing %s/%s: %v", namespace, name, err)
+	}
+
 	return nil
 }
 
@@ -552,31 +559,131 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 
 // scaleUpServingGroups scales up the ServingGroups to the expected count.
 // It creates new ServingGroups with increasing indices starting from the current max index + 1.
+// When partition is set, if a servingGroup at a specific ordinal was previously deleted,
+// it will be recreated using the previous revision instead of the new revision.
 func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int, newRevision string) error {
-	startingIndex := 0
-	// servingGroupList is already sorted in ascending order by index
-	if len(servingGroupList) > 0 {
-		_, ordinal := utils.GetParentNameAndOrdinal(servingGroupList[len(servingGroupList)-1].Name)
-		startingIndex = ordinal + 1
+	// Determine the partition value
+	partition := 0
+	if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
+		partition = int(*mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
 	}
 
-	// Calculate how many new ServingGroups we need to create
-	toCreate := expectedCount - len(servingGroupList)
-	// Create new ServingGroups with increasing indices
-	for i := 0; i < toCreate; i++ {
-		newIndex := startingIndex + i
-		groupName := utils.GenerateServingGroupName(mi.Name, newIndex)
-		// Ensure a PodGroup exists for the new ServingGroup when gang scheduling is enabled.
-		if err := c.podGroupManager.CreateOrUpdatePodGroup(ctx, mi, groupName); err != nil {
-			return err
+	// Find the maximum ordinal in existing servingGroups
+	// Since servingGroupList is already sorted in ascending order by ordinal,
+	// we can directly get the maxOrdinal from the last element
+	maxOrdinal := -1
+	existingOrdinals := make(map[int]bool)
+	for _, group := range servingGroupList {
+		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
+		existingOrdinals[ordinal] = true
+	}
+	// Get maxOrdinal from the last element (list is sorted in ascending order)
+	if len(servingGroupList) > 0 {
+		_, maxOrdinal = utils.GetParentNameAndOrdinal(servingGroupList[len(servingGroupList)-1].Name)
+	}
+
+	// Check if we need to fill gaps for version control (when partition is set and there are historical revisions)
+	needToFillGaps := false
+	if partition > 0 {
+		// Check if there are any historical revisions for ordinals below partition that need to be restored
+		for ordinal := 0; ordinal < partition && ordinal < expectedCount; ordinal++ {
+			if !existingOrdinals[ordinal] {
+				// Check ControllerRevision for historical revisions
+				historicalRevision, err := utils.GetLatestControllerRevision(ctx, c.kubeClientSet, mi, ordinal)
+				if err != nil {
+					klog.V(4).Infof("Failed to get revision history from ControllerRevision for ordinal %d: %v", ordinal, err)
+				}
+				if historicalRevision != "" {
+					needToFillGaps = true
+					break
+				}
+			}
+		}
+	}
+
+	if needToFillGaps {
+		// Fill gaps first (from 0 to expectedCount-1) for version control
+		for ordinal := 0; ordinal < expectedCount; ordinal++ {
+			if existingOrdinals[ordinal] {
+				continue
+			}
+
+			// Determine which revision to use
+			revisionToUse := newRevision
+			if ordinal < partition {
+				// For ordinals below partition, check if there's a historical revision from ControllerRevision
+				historicalRevision, err := utils.GetLatestControllerRevision(ctx, c.kubeClientSet, mi, ordinal)
+				if err != nil {
+					klog.Warningf("Failed to get revision history from ControllerRevision for ordinal %d: %v", ordinal, err)
+				}
+				if historicalRevision != "" {
+					revisionToUse = historicalRevision
+					klog.Infof("Recreating ServingGroup at ordinal %d with historical revision %s from ControllerRevision (partition=%d)", ordinal, historicalRevision, partition)
+				} else {
+					// If no historical revision found, use CurrentRevision from status (following StatefulSet behavior)
+					// This handles the case where a partition-protected ServingGroup was deleted but history wasn't recorded
+					if mi.Status.CurrentRevision != "" && mi.Status.CurrentRevision != newRevision {
+						revisionToUse = mi.Status.CurrentRevision
+						klog.Infof("Recreating partition-protected ServingGroup at ordinal %d with CurrentRevision %s (no historical record found, partition=%d)", ordinal, mi.Status.CurrentRevision, partition)
+					}
+				}
+			}
+
+			groupName := utils.GenerateServingGroupName(mi.Name, ordinal)
+			// Ensure a PodGroup exists for the new ServingGroup when gang scheduling is enabled.
+			if err := c.podGroupManager.CreateOrUpdatePodGroup(ctx, mi, groupName); err != nil {
+				return err
+			}
+
+			// Create pods for ServingGroup
+			if err := c.CreatePodsForServingGroup(ctx, mi, ordinal, revisionToUse); err != nil {
+				return fmt.Errorf("create Serving group failed: %v", err)
+			}
+			// Insert new ServingGroup to global storage
+			c.store.AddServingGroup(utils.GetNamespaceName(mi), ordinal, revisionToUse)
+		}
+	} else {
+		// Original behavior: create new ServingGroups with increasing indices starting from the current max index + 1
+		startingIndex := 0
+		if len(servingGroupList) > 0 {
+			startingIndex = maxOrdinal + 1
 		}
 
-		// Create pods for ServingGroup
-		if err := c.CreatePodsForServingGroup(ctx, mi, newIndex, newRevision); err != nil {
-			return fmt.Errorf("create Serving group failed: %v", err)
+		// Calculate how many new ServingGroups we need to create
+		toCreate := expectedCount - len(servingGroupList)
+		// Create new ServingGroups with increasing indices
+		for i := 0; i < toCreate; i++ {
+			newIndex := startingIndex + i
+			// Determine which revision to use for partition-protected ordinals
+			revisionToUse := newRevision
+			if partition > 0 && newIndex < partition {
+				// For ordinals below partition, check if there's a historical revision from ControllerRevision
+				historicalRevision, err := utils.GetLatestControllerRevision(ctx, c.kubeClientSet, mi, newIndex)
+				if err != nil {
+					klog.Warningf("Failed to get revision history from ControllerRevision for ordinal %d: %v", newIndex, err)
+				}
+				if historicalRevision != "" {
+					revisionToUse = historicalRevision
+					klog.Infof("Creating partition-protected ServingGroup at ordinal %d with historical revision %s from ControllerRevision (partition=%d)", newIndex, historicalRevision, partition)
+				} else if mi.Status.CurrentRevision != "" && mi.Status.CurrentRevision != newRevision {
+					// If no historical revision found, use CurrentRevision (following StatefulSet behavior)
+					revisionToUse = mi.Status.CurrentRevision
+					klog.Infof("Creating partition-protected ServingGroup at ordinal %d with CurrentRevision %s (no historical record found, partition=%d)", newIndex, mi.Status.CurrentRevision, partition)
+				}
+			}
+			groupName := utils.GenerateServingGroupName(mi.Name, newIndex)
+			// Ensure a PodGroup exists for the new ServingGroup when gang scheduling is enabled.
+			if err := c.podGroupManager.CreateOrUpdatePodGroup(ctx, mi, groupName); err != nil {
+				return err
+			}
+
+			// Create pods for ServingGroup
+			if err := c.CreatePodsForServingGroup(ctx, mi, newIndex, revisionToUse); err != nil {
+				return fmt.Errorf("create Serving group failed: %v", err)
+			}
+			// Insert new ServingGroup to global storage
+			c.store.AddServingGroup(utils.GetNamespaceName(mi), newIndex, revisionToUse)
 		}
-		// Insert new ServingGroup to global storage
-		c.store.AddServingGroup(utils.GetNamespaceName(mi), newIndex, newRevision)
 	}
 
 	return nil
@@ -1066,11 +1173,24 @@ func (c *ModelServingController) getServicesByIndex(indexName, indexValue string
 func (c *ModelServingController) UpdateModelServingStatus(mi *workloadv1alpha1.ModelServing, revision string) error {
 	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
 	if err != nil {
+		// If no groups exist, handle gracefully by setting revisions to the new revision
+		if errors.Is(err, datastore.ErrServingGroupNotFound) {
+			copy := mi.DeepCopy()
+			if copy.Status.CurrentRevision != revision || copy.Status.UpdateRevision != revision {
+				copy.Status.CurrentRevision = revision
+				copy.Status.UpdateRevision = revision
+				_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
+				return updateErr
+			}
+			return nil
+		}
 		return err
 	}
 
 	available, updated, current := 0, 0, 0
 	progressingGroups, updatedGroups, currentGroups := []int{}, []int{}, []int{}
+	// Track revision counts to determine the most common non-updated revision (CurrentRevision)
+	revisionCount := make(map[string]int)
 	for index := range groups {
 		if groups[index].Status == datastore.ServingGroupDeleting {
 			// Scaling -> Running or
@@ -1101,6 +1221,8 @@ func (c *ModelServingController) UpdateModelServingStatus(mi *workloadv1alpha1.M
 		} else {
 			current = current + 1
 			currentGroups = append(currentGroups, index)
+			// Count revisions for non-updated groups to find the most common one
+			revisionCount[groups[index].Revision]++
 		}
 	}
 
@@ -1112,6 +1234,56 @@ func (c *ModelServingController) UpdateModelServingStatus(mi *workloadv1alpha1.M
 		copy.Status.AvailableReplicas = int32(available)
 		copy.Status.UpdatedReplicas = int32(updated)
 		copy.Status.CurrentReplicas = int32(current)
+	}
+
+	// Update revision fields following StatefulSet's logic:
+	// 1. UpdateRevision is always the new revision being applied
+	// 2. CurrentRevision is read from Status.CurrentRevision if it exists and is still valid
+	// 3. If Status.CurrentRevision doesn't exist or is invalid, compute from current groups
+	// 4. When all groups are updated, CurrentRevision = UpdateRevision
+	updateRevision := revision
+	var currentRevision string
+
+	// First, try to use existing CurrentRevision from status if it's still valid
+	if copy.Status.CurrentRevision != "" {
+		// Check if CurrentRevision is still valid (exists in non-updated groups)
+		if len(revisionCount) > 0 {
+			// Check if the existing CurrentRevision is still used by some groups
+			if count, exists := revisionCount[copy.Status.CurrentRevision]; exists && count > 0 {
+				currentRevision = copy.Status.CurrentRevision
+			}
+		}
+		// If all groups are updated, CurrentRevision should equal UpdateRevision
+		if updated == len(groups) {
+			currentRevision = updateRevision
+		}
+	}
+
+	// If CurrentRevision is not set (either not in status or invalid), compute it from current groups
+	if currentRevision == "" {
+		if updated == len(groups) || len(revisionCount) == 0 {
+			// All groups are updated or no groups exist
+			currentRevision = updateRevision
+		} else {
+			// Find the revision with the highest count among non-updated groups
+			maxCount := 0
+			for rev, count := range revisionCount {
+				if count > maxCount {
+					maxCount = count
+					currentRevision = rev
+				}
+			}
+			// If no current revision found (shouldn't happen), fallback to updateRevision
+			if currentRevision == "" {
+				currentRevision = updateRevision
+			}
+		}
+	}
+
+	if copy.Status.CurrentRevision != currentRevision || copy.Status.UpdateRevision != updateRevision {
+		shouldUpdate = true
+		copy.Status.CurrentRevision = currentRevision
+		copy.Status.UpdateRevision = updateRevision
 	}
 
 	if copy.Spec.RolloutStrategy == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition == nil {
@@ -1172,6 +1344,26 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi 
 
 	var err []error
 	for i := len(groupScores) - 1; i >= expectedCount; i-- {
+		// Record revision history using ControllerRevision before deleting, especially important for partition-protected servingGroups
+		group := c.store.GetServingGroup(utils.GetNamespaceName(mi), groupScores[i].Name)
+		if group != nil {
+			_, ordinal := utils.GetParentNameAndOrdinal(groupScores[i].Name)
+			// Determine partition value
+			partition := 0
+			if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
+				partition = int(*mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
+			}
+			// Record revision history using ControllerRevision for partition-protected servingGroups
+			if partition > 0 && ordinal < partition {
+				templateData := mi.Spec.Template.Roles
+				_, createErr := utils.CreateControllerRevision(ctx, c.kubeClientSet, mi, ordinal, group.Revision, templateData)
+				if createErr != nil {
+					klog.Warningf("Failed to create ControllerRevision for ServingGroup %s (ordinal=%d, revision=%s): %v", groupScores[i].Name, ordinal, group.Revision, createErr)
+					// Note: We don't fallback to in-memory storage as ControllerRevision is the source of truth
+				}
+			}
+			// Note: Non-partition-protected groups don't need revision history as they will use the new revision
+		}
 		if e := c.deleteServingGroup(ctx, mi, groupScores[i].Name); e != nil {
 			err = append(err, e)
 		}
@@ -1262,6 +1454,32 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, mi *wor
 	status := c.store.GetServingGroupStatus(utils.GetNamespaceName(mi), servingGroupName)
 	if status == datastore.ServingGroupNotFound {
 		return nil
+	}
+
+	// Record revision history using ControllerRevision before deleting, especially important for partition-protected servingGroups
+	// This ensures that when a partition-protected ServingGroup is deleted (e.g., due to failure),
+	// it can be recreated with its previous revision, following StatefulSet's behavior.
+	group := c.store.GetServingGroup(utils.GetNamespaceName(mi), servingGroupName)
+	if group != nil {
+		_, ordinal := utils.GetParentNameAndOrdinal(servingGroupName)
+		// Determine partition value
+		partition := 0
+		if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
+			partition = int(*mi.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition)
+		}
+		// Record revision history using ControllerRevision for partition-protected servingGroups
+		if partition > 0 && ordinal < partition {
+			// Create ControllerRevision to persist the revision history
+			// Store the template roles data for this revision
+			templateData := mi.Spec.Template.Roles
+			_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, mi, ordinal, group.Revision, templateData)
+			if err != nil {
+				klog.Warningf("Failed to create ControllerRevision for ServingGroup %s (ordinal=%d, revision=%s): %v", servingGroupName, ordinal, group.Revision, err)
+				// Note: We don't fallback to in-memory storage as ControllerRevision is the source of truth
+			} else {
+				klog.V(2).Infof("Created ControllerRevision for partition-protected ServingGroup %s (ordinal=%d, revision=%s, partition=%d)", servingGroupName, ordinal, group.Revision, partition)
+			}
+		}
 	}
 
 	if err := c.podGroupManager.DeletePodGroup(ctx, mi, servingGroupName); err != nil {
