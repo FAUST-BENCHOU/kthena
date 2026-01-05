@@ -600,53 +600,50 @@ func (c *ModelServingController) manageRole(ctx context.Context, mi *workloadv1a
 	return nil
 }
 
-// scaleDownRoles handles Role scaling down
+// scaleDownRoles handles Role scaling down with two-level priority-based selection:
+// 1. Primary: Not-ready roles (Creating, NotFound) are deleted first
+// 2. Secondary: Among roles with same status, lower deletion cost = delete first
 func (c *ModelServingController) scaleDownRoles(ctx context.Context, mi *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int) {
-	// Calculate scores for all Roles
+	// Calculate priority information for all Roles
 	var roleScores []RoleWithScore
 
-	needsSort := false
 	for _, role := range roleList {
-		// Get score for each Role.
-		// If not set 'PodDeletionCost` annotation, the score is set to 0.
-		score, err := c.calculateRoleScore(mi, groupName, targetRole.Name, role.Name)
-		if err != nil {
-			klog.Errorf("Failed to calculate score for role %s: %v", role.Name, err)
-			continue
-		}
-		_, roleIndex := utils.GetParentNameAndOrdinal(role.Name)
-		roleScores = append(roleScores, RoleWithScore{
-			Name:  role.Name,
-			Score: score,
-			Index: roleIndex,
-		})
-		if score != 0 {
-			needsSort = true
-		}
+		scoreInfo := c.calculateRoleScore(mi, groupName, targetRole.Name, role.Name)
+		roleScores = append(roleScores, scoreInfo)
 	}
 
-	// Sort Roles by score in descending order, and by index in ascending order if scores are equal.
-	// This puts items with lower scores (or higher indices when scores are equal) at the end.
-	// Skip sorting when all scores are 0 because roleList is already sorted by index in ascending order.
-	if needsSort {
-		slices.SortFunc(roleScores, func(a, b RoleWithScore) int {
-			if a.Score != b.Score {
-				return cmp.Compare(b.Score, a.Score)
-			}
-			return cmp.Compare(a.Index, b.Index)
-		})
-	}
+	// Sort by priority tuple: (priority, deletionCost, index)
+	// Lower priority value = higher deletion priority (delete first)
+	// Lower deletion cost = higher deletion priority
+	// Higher index = higher deletion priority (backward compatibility)
+	slices.SortFunc(roleScores, func(a, b RoleWithScore) int {
+		// Primary: Sort by priority (not-ready first)
+		if a.Priority != b.Priority {
+			return cmp.Compare(a.Priority, b.Priority) // Ascending: lower priority (not-ready) first
+		}
+
+		// Secondary: Among roles with same priority, lower deletion cost comes first
+		if a.DeletionCost != b.DeletionCost {
+			return cmp.Compare(a.DeletionCost, b.DeletionCost) // Ascending: lower cost first
+		}
+
+		// Tertiary: Higher index comes first (backward compatibility)
+		return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
+	})
+
 	// Role needs to scale down, and the ServingGroup status needs to be set to Scaling
-
 	err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), groupName, datastore.ServingGroupScaling)
 	if err != nil {
 		klog.Errorf("failed to set ServingGroup %s/%s status: %v", mi.Namespace+"/"+mi.Name, groupName, err)
 		return
 	}
 
-	// Delete items from end to front. Items at the end have lower scores (or higher indices when scores are 0).
-	for i := len(roleScores) - 1; i >= expectedCount; i-- {
+	// Delete from beginning (not-ready, low cost, high index first)
+	numToDelete := len(roleScores) - expectedCount
+	for i := 0; i < numToDelete; i++ {
 		targetName := roleScores[i].Name
+		klog.V(2).Infof("Scaling down role %s (priority: %d, deletion cost: %d, index: %d)",
+			targetName, roleScores[i].Priority, roleScores[i].DeletionCost, roleScores[i].Index)
 		c.DeleteRole(ctx, mi, groupName, targetRole.Name, targetName)
 	}
 }
@@ -803,7 +800,28 @@ func (c *ModelServingController) handleReadyPod(mi *workloadv1alpha1.ModelServin
 		Namespace: mi.Namespace,
 		Name:      mi.Name,
 	}, servingGroupName, newPod.Name, utils.PodRevision(newPod), utils.PodRoleName(newPod), utils.PodRoleID(newPod))
-	ready, err := c.checkServingGroupReady(mi, servingGroupName)
+
+	// Check if the role is truly running before updating its status
+	roleName := utils.PodRoleName(newPod)
+	roleID := utils.PodRoleID(newPod)
+	ready, err := c.checkRoleReady(mi, servingGroupName, roleName, roleID)
+	if err != nil {
+		klog.Warningf("failed to check role %s/%s readiness: %v", roleName, roleID, err)
+		// Don't return error here as this is not critical
+	}
+	if ready {
+		// All pods in the Role are running, update role status to Running
+		err = c.store.UpdateRoleStatus(utils.GetNamespaceName(mi), servingGroupName, roleName, roleID, datastore.RoleRunning)
+		if err != nil {
+			klog.Warningf("failed to update role %s/%s status to Running: %v", roleName, roleID, err)
+			// Don't return error here as this is not critical
+		}
+		klog.V(2).Infof("Update role %s/%s status to Running", roleName, roleID)
+	} else {
+		klog.V(4).Infof("Role %s/%s still creating", roleName, roleID)
+	}
+
+	ready, err = c.checkServingGroupReady(mi, servingGroupName)
 	if err != nil {
 		return fmt.Errorf("failed to check ServingGroup status, err: %v", err)
 	}
@@ -835,6 +853,19 @@ func (c *ModelServingController) handleErrorPod(mi *workloadv1alpha1.ModelServin
 		Namespace: mi.Namespace,
 		Name:      mi.Name,
 	}, servingGroupName, errPod.Name)
+
+	// Update role status back to Creating when pod fails
+	roleName := utils.PodRoleName(errPod)
+	roleID := utils.PodRoleID(errPod)
+	if roleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(mi), servingGroupName, roleName, roleID); roleStatus == datastore.RoleRunning {
+		err := c.store.UpdateRoleStatus(utils.GetNamespaceName(mi), servingGroupName, roleName, roleID, datastore.RoleCreating)
+		if err != nil {
+			klog.Warningf("failed to update role %s/%s status to Creating: %v", roleName, roleID, err)
+		} else {
+			klog.V(2).Infof("update role %s/%s to Creating when pod fails", roleName, roleID)
+		}
+	}
+
 	// If the ServingGroup status is already running, the status needs to be updated
 	if groupStatus := c.store.GetServingGroupStatus(utils.GetNamespaceName(mi), servingGroupName); groupStatus == datastore.ServingGroupRunning {
 		err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), servingGroupName, datastore.ServingGroupCreating)
@@ -927,6 +958,50 @@ func (c *ModelServingController) checkServingGroupReady(mi *workloadv1alpha1.Mod
 		// the number of running pods does not reach the expected number
 		return false, nil
 	}
+	return true, nil
+}
+
+func (c *ModelServingController) checkRoleReady(mi *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) (bool, error) {
+	// Get all pods for this specific role
+	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", mi.Namespace, servingGroupName, roleName, roleID)
+	pods, err := c.getPodsByIndex(RoleIDKey, roleIDValue)
+	if err != nil {
+		return false, fmt.Errorf("failed to get pods for role %s/%s: %v", roleName, roleID, err)
+	}
+
+	// Find the role specification to get expected pod count
+	var targetRole *workloadv1alpha1.Role
+	for i := range mi.Spec.Template.Roles {
+		if mi.Spec.Template.Roles[i].Name == roleName {
+			targetRole = &mi.Spec.Template.Roles[i]
+			break
+		}
+	}
+
+	if targetRole == nil {
+		klog.Warningf("role %s not found in ModelServing spec", roleName)
+		return false, nil
+	}
+
+	// Calculate expected pod count for this role replica
+	// Each role replica has 1 entry pod + workerReplicas worker pods
+	expectedPods := 1 + int(targetRole.WorkerReplicas)
+
+	// Count running and ready pods
+	runningPods := 0
+	for _, pod := range pods {
+		if utils.IsPodRunningAndReady(pod) {
+			runningPods++
+		}
+	}
+
+	if runningPods != expectedPods {
+		// the number of running pods does not reach the expected number
+		klog.V(4).Infof("Role %s/%s: %d/%d pods running", roleName, roleID, runningPods, expectedPods)
+		return false, nil
+	}
+
+	klog.V(4).Infof("Role %s/%s: all %d pods are running", roleName, roleID, runningPods)
 	return true, nil
 }
 
@@ -1140,42 +1215,49 @@ func (c *ModelServingController) UpdateModelServingStatus(mi *workloadv1alpha1.M
 	return nil
 }
 
-// scaleDownServingGroups scales down the ServingGroups to the expected count.
+// scaleDownServingGroups scales down the ServingGroups to the expected count with two-level priority-based selection:
+// 1. Primary: Not-ready groups (Creating, NotFound) are deleted first
+// 2. Secondary: Among groups with same status, lower deletion cost = delete first
 func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, mi *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int) error {
+	// Calculate priority information for all ServingGroups
 	var groupScores []ServingGroupWithScore
-	needsSort := false
+
 	for _, group := range servingGroupList {
-		score, err := c.calculateServingGroupScore(mi, group.Name)
-		if err != nil {
-			klog.Errorf("Failed to calculate score for serving group %s: %v", group.Name, err)
-			continue
-		}
-		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
-		groupScores = append(groupScores, ServingGroupWithScore{
-			Name:  group.Name,
-			Score: score,
-			Index: ordinal,
-		})
-		if score != 0 {
-			needsSort = true
-		}
+		scoreInfo := c.calculateServingGroupScore(mi, group.Name)
+		groupScores = append(groupScores, scoreInfo)
 	}
 
-	if needsSort {
-		slices.SortFunc(groupScores, func(a, b ServingGroupWithScore) int {
-			if a.Score != b.Score {
-				return cmp.Compare(b.Score, a.Score)
-			}
-			return cmp.Compare(a.Index, b.Index)
-		})
-	}
+	// Sort by priority tuple: (priority, deletionCost, index)
+	// Lower priority value = higher deletion priority (delete first)
+	// Lower deletion cost = higher deletion priority
+	// Higher index = higher deletion priority (backward compatibility)
+	slices.SortFunc(groupScores, func(a, b ServingGroupWithScore) int {
+		// Primary: Sort by priority (not-ready first)
+		if a.Priority != b.Priority {
+			return cmp.Compare(a.Priority, b.Priority) // Ascending: lower priority (not-ready) first
+		}
 
+		// Secondary: Among groups with same priority, lower deletion cost comes first
+		if a.DeletionCost != b.DeletionCost {
+			return cmp.Compare(a.DeletionCost, b.DeletionCost) // Ascending: lower cost first
+		}
+
+		// Tertiary: Higher index comes first (backward compatibility)
+		return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
+	})
+
+	// Delete from beginning (not-ready, low cost, high index first)
+	numToDelete := len(groupScores) - expectedCount
 	var err []error
-	for i := len(groupScores) - 1; i >= expectedCount; i-- {
-		if e := c.deleteServingGroup(ctx, mi, groupScores[i].Name); e != nil {
+	for i := 0; i < numToDelete; i++ {
+		targetGroup := groupScores[i]
+		klog.V(2).Infof("Scaling down serving group %s (priority: %d, deletion cost: %d, index: %d)",
+			targetGroup.Name, targetGroup.Priority, targetGroup.DeletionCost, targetGroup.Index)
+		if e := c.deleteServingGroup(ctx, mi, targetGroup.Name); e != nil {
 			err = append(err, e)
 		}
 	}
+
 	if len(err) > 0 {
 		return errors.Join(err...)
 	}

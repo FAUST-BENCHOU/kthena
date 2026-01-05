@@ -82,6 +82,7 @@ type RoleStatus string
 
 const (
 	RoleCreating RoleStatus = "Creating"
+	RoleRunning  RoleStatus = "Running"
 	RoleDeleting RoleStatus = "Deleting"
 	RoleNotFound RoleStatus = "NotFound"
 )
