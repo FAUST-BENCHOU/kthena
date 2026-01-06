@@ -2091,8 +2091,9 @@ func TestModelServingVersionControl(t *testing.T) {
 			kubeClient := kubefake.NewSimpleClientset()
 			kthenaClient := kthenafake.NewSimpleClientset()
 			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextfake := apiextfake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
 			assert.NoError(t, err)
 
 			miName := fmt.Sprintf("test-version-control-%d", idx)
@@ -2300,8 +2301,9 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 			kubeClient := kubefake.NewSimpleClientset()
 			kthenaClient := kthenafake.NewSimpleClientset()
 			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextfake := apiextfake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
 			assert.NoError(t, err)
 
 			miName := fmt.Sprintf("test-revision-fields-%d", idx)
