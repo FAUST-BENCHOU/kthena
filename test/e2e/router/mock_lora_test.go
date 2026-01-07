@@ -28,6 +28,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/volcano-sh/kthena/test/e2e/utils"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -59,10 +60,20 @@ func TestMockServiceLoRASupport(t *testing.T) {
 
 	t.Logf("Testing mock service on Pod: %s/%s (IP: %s)", targetPod.Namespace, targetPod.Name, targetPod.Status.PodIP)
 
+	// Set up port-forward to access Pod's port 8000
+	localPort := "18000" // Use a different local port to avoid conflicts
+	podPort := "8000"    // Pod's service port
+
+	pf, err := utils.SetupPortForwardToPod(targetPod.Namespace, targetPod.Name, localPort, podPort)
+	require.NoError(t, err, "Failed to setup port-forward")
+	defer pf.Close()
+
+	t.Logf("Port-forward to %s:%s is ready (local port: %s)", targetPod.Name, podPort, localPort)
+
 	// Test 1: Verify Pod responds to base model name
 	t.Run("BaseModelName", func(t *testing.T) {
 		baseModelName := "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-		resp := sendDirectRequestToPod(t, targetPod.Status.PodIP, 8000, baseModelName)
+		resp := sendDirectRequestToPod(t, "127.0.0.1", localPort, baseModelName)
 		assert.Equal(t, http.StatusOK, resp.StatusCode, "Base model name should return 200")
 		t.Logf("Base model name test passed: status=%d, body=%s", resp.StatusCode, resp.Body)
 	})
@@ -70,7 +81,7 @@ func TestMockServiceLoRASupport(t *testing.T) {
 	// Test 2: Test with "lora-A" model name
 	t.Run("LoRAAdapterA", func(t *testing.T) {
 		loraModelName := "lora-A"
-		resp := sendDirectRequestToPod(t, targetPod.Status.PodIP, 8000, loraModelName)
+		resp := sendDirectRequestToPod(t, "127.0.0.1", localPort, loraModelName)
 		t.Logf("LoRA-A test result: status=%d, body=%s", resp.StatusCode, resp.Body)
 
 		if resp.StatusCode != http.StatusOK {
@@ -84,7 +95,7 @@ func TestMockServiceLoRASupport(t *testing.T) {
 	// Test 3: Test with "lora-B" model name
 	t.Run("LoRAAdapterB", func(t *testing.T) {
 		loraModelName := "lora-B"
-		resp := sendDirectRequestToPod(t, targetPod.Status.PodIP, 8000, loraModelName)
+		resp := sendDirectRequestToPod(t, "127.0.0.1", localPort, loraModelName)
 		t.Logf("LoRA-B test result: status=%d, body=%s", resp.StatusCode, resp.Body)
 
 		if resp.StatusCode != http.StatusOK {
@@ -98,14 +109,14 @@ func TestMockServiceLoRASupport(t *testing.T) {
 	// Test 4: Test with a random model name to see how mock service handles unknown models
 	t.Run("UnknownModelName", func(t *testing.T) {
 		unknownModelName := "unknown-model-12345"
-		resp := sendDirectRequestToPod(t, targetPod.Status.PodIP, 8000, unknownModelName)
+		resp := sendDirectRequestToPod(t, "127.0.0.1", localPort, unknownModelName)
 		t.Logf("Unknown model test result: status=%d, body=%s", resp.StatusCode, resp.Body)
 	})
 }
 
-// sendDirectRequestToPod sends a chat completions request directly to a Pod
-func sendDirectRequestToPod(t *testing.T, podIP string, port int32, modelName string) *DirectPodResponse {
-	url := fmt.Sprintf("http://%s:%d/v1/chat/completions", podIP, port)
+// sendDirectRequestToPod sends a chat completions request directly to a Pod via port-forward
+func sendDirectRequestToPod(t *testing.T, host string, port string, modelName string) *DirectPodResponse {
+	url := fmt.Sprintf("http://%s:%s/v1/chat/completions", host, port)
 
 	requestBody := map[string]interface{}{
 		"model": modelName,
