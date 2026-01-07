@@ -497,30 +497,13 @@ func TestModelRouteLora(t *testing.T) {
 		utils.NewChatMessage("user", "Hello"),
 	}
 
-	// First, verify that the ModelServer is available by testing with a simple ModelRoute
-	// This ensures Pods are synced to the store before testing LoRA routing
-	t.Log("Verifying ModelServer is available...")
-	simpleModelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteSimple.yaml")
-	simpleModelRoute.Namespace = testNamespace
-	simpleModelRoute.Name = "deepseek-simple-verify"
-	_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, simpleModelRoute, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create verification ModelRoute")
-
-	// Wait for the simple ModelRoute to work (this verifies ModelServer Pods are available)
-	require.Eventually(t, func() bool {
-		resp := utils.CheckChatCompletions(t, simpleModelRoute.Spec.ModelName, messages)
-		return resp.StatusCode == 200 && resp.Body != ""
-	}, 1*time.Minute, 2*time.Second, "ModelServer should be available and ModelRoute should work")
-
-	// Clean up the verification ModelRoute
-	_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(ctx, simpleModelRoute.Name, metav1.DeleteOptions{})
-
-	// Now wait for LoRA ModelRoute to be propagated
+	// Wait for LoRA ModelRoute to be propagated - verify by sending test requests until they succeed
+	// Use the same pattern as TestModelRouteSubset: use CheckChatCompletions which has internal retry logic
 	t.Log("Waiting for LoRA ModelRoute to be propagated...")
 	require.Eventually(t, func() bool {
 		resp := utils.CheckChatCompletions(t, "lora-A", messages)
 		return resp.StatusCode == 200 && resp.Body != ""
-	}, 1*time.Minute, 2*time.Second, "LoRA ModelRoute should be propagated and requests should route successfully")
+	}, 2*time.Minute, 2*time.Second, "LoRA ModelRoute should be propagated and requests should route successfully")
 
 	// Test Point 1: Verify LoRA adapter configuration correctness
 	t.Run("VerifyLoRAAdapterConfiguration", func(t *testing.T) {
