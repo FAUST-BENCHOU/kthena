@@ -17,8 +17,12 @@ limitations under the License.
 package router
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -464,5 +468,136 @@ func TestModelRouteSubset(t *testing.T) {
 		updatedModelRoute.Spec.Rules[0].TargetModels[1].Weight = &weight30Restore
 		_, err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, updatedModelRoute, metav1.UpdateOptions{})
 		require.NoError(t, err, "Failed to restore ModelRoute weights")
+	})
+}
+
+// TestModelRouteLora tests LoRA adapter routing functionality.
+func TestModelRouteLora(t *testing.T) {
+	ctx := context.Background()
+
+	// Deploy ModelRoute with LoRA adapter configuration
+	t.Log("Deploying ModelRoute with LoRA adapter support...")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteLora.yaml")
+	modelRoute.Namespace = testNamespace
+	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelRoute")
+	assert.NotNil(t, createdModelRoute)
+	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+
+	// Register cleanup function to delete ModelRoute after test completes
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
+		}
+	})
+
+	messages := []utils.ChatMessage{
+		utils.NewChatMessage("user", "Hello"),
+	}
+
+	// Wait for LoRA ModelRoute to be propagated - verify by sending test requests until they succeed
+	// Use the same pattern as TestModelRouteSubset: use CheckChatCompletions which has internal retry logic
+	t.Log("Waiting for LoRA ModelRoute to be propagated...")
+	require.Eventually(t, func() bool {
+		resp := utils.CheckChatCompletions(t, "lora-A", messages)
+		return resp.StatusCode == 200 && resp.Body != ""
+	}, 2*time.Minute, 2*time.Second, "LoRA ModelRoute should be propagated and requests should route successfully")
+
+	// Test Point 1: Verify LoRA adapter configuration correctness
+	t.Run("VerifyLoRAAdapterConfiguration", func(t *testing.T) {
+		// Verify that the ModelRoute has the correct LoRA adapter configuration
+		assert.NotNil(t, createdModelRoute.Spec.LoraAdapters, "LoraAdapters should not be nil")
+		assert.Len(t, createdModelRoute.Spec.LoraAdapters, 2, "Should have 2 LoRA adapters configured")
+		assert.Contains(t, createdModelRoute.Spec.LoraAdapters, "lora-A", "Should contain lora-A")
+		assert.Contains(t, createdModelRoute.Spec.LoraAdapters, "lora-B", "Should contain lora-B")
+		t.Logf("LoRA adapter configuration verified: %v", createdModelRoute.Spec.LoraAdapters)
+	})
+
+	// Test Point 2: Verify LoRA adapter parameter passing in requests
+	t.Run("VerifyLoRAAdapterParameterPassing", func(t *testing.T) {
+		// Test with lora-A adapter
+		t.Log("Testing request with lora-A adapter...")
+		resp := utils.CheckChatCompletions(t, "lora-A", messages)
+		assert.Equal(t, 200, resp.StatusCode, "Request with lora-A should succeed")
+		assert.NotEmpty(t, resp.Body, "Response body should not be empty")
+		t.Logf("lora-A request successful: %s", resp.Body)
+
+		// Test with lora-B adapter
+		t.Log("Testing request with lora-B adapter...")
+		resp = utils.CheckChatCompletions(t, "lora-B", messages)
+		assert.Equal(t, 200, resp.StatusCode, "Request with lora-B should succeed")
+		assert.NotEmpty(t, resp.Body, "Response body should not be empty")
+		t.Logf("lora-B request successful: %s", resp.Body)
+	})
+
+	// Test Point 3: Verify support for multiple LoRA adapters
+	t.Run("VerifyMultipleLoRAAdapters", func(t *testing.T) {
+		// Send multiple requests with different LoRA adapters
+		const numRequests = 10
+		loraACount := 0
+		loraBCount := 0
+
+		for i := 0; i < numRequests; i++ {
+			// Alternate between lora-A and lora-B
+			loraName := "lora-A"
+			if i%2 == 1 {
+				loraName = "lora-B"
+			}
+
+			resp := utils.CheckChatCompletions(t, loraName, messages)
+			assert.Equal(t, 200, resp.StatusCode, "Request with %s should succeed", loraName)
+			assert.NotEmpty(t, resp.Body, "Response body should not be empty")
+
+			if loraName == "lora-A" {
+				loraACount++
+			} else {
+				loraBCount++
+			}
+		}
+
+		// Verify both adapters were used
+		assert.Equal(t, numRequests/2, loraACount, "Should have sent %d requests with lora-A", numRequests/2)
+		assert.Equal(t, numRequests/2, loraBCount, "Should have sent %d requests with lora-B", numRequests/2)
+		t.Logf("Multiple LoRA adapters verified: lora-A (%d requests), lora-B (%d requests)", loraACount, loraBCount)
+	})
+
+	// Test Point 4: Verify error handling when LoRA adapter doesn't exist
+	t.Run("VerifyErrorHandlingForNonExistentLoRAAdapter", func(t *testing.T) {
+		// Test with a non-existent LoRA adapter
+		t.Log("Testing request with non-existent LoRA adapter (lora-NonExistent)...")
+
+		// Create request body
+		requestBody := utils.ChatCompletionsRequest{
+			Model:    "lora-NonExistent",
+			Messages: messages,
+			Stream:   false,
+		}
+
+		jsonData, err := json.Marshal(requestBody)
+		require.NoError(t, err, "Failed to marshal request body")
+
+		// Send request without retries to test error response
+		client := &http.Client{
+			Timeout: 30 * time.Second,
+		}
+
+		req, err := http.NewRequest("POST", utils.DefaultRouterURL, bytes.NewBuffer(jsonData))
+		require.NoError(t, err, "Failed to create HTTP request")
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		require.NoError(t, err, "Failed to send HTTP request")
+		defer resp.Body.Close()
+
+		responseBody, err := io.ReadAll(resp.Body)
+		require.NoError(t, err, "Failed to read response body")
+		responseStr := string(responseBody)
+
+		// Verify that the request fails with 404 or contains error
+		assert.True(t, resp.StatusCode == 404 || resp.StatusCode >= 400,
+			"Request with non-existent LoRA adapter should return 404 or error status, got %d", resp.StatusCode)
+		t.Logf("Non-existent LoRA adapter request returned status %d: %s", resp.StatusCode, responseStr)
 	})
 }
