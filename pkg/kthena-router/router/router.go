@@ -296,7 +296,23 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		}
 
 		model := modelServer.Spec.Model
-		if model != nil && !isLora {
+		if isLora {
+			// For LoRA requests: replace model name with base model and add LoRA info to extra_body
+			if model != nil {
+				modelRequest["model"] = *model
+			}
+			// Extract or create extra_body and add lora_request
+			extraBody, ok := modelRequest["extra_body"].(map[string]interface{})
+			if !ok {
+				extraBody = make(map[string]interface{})
+				modelRequest["extra_body"] = extraBody
+			}
+			// Add lora_request with the original LoRA adapter name from model field
+			extraBody["lora_request"] = map[string]interface{}{
+				"name": modelName, // Use the original LoRA adapter name from request
+			}
+		} else if model != nil {
+			// For non-LoRA requests, replace with base model name if specified
 			modelRequest["model"] = *model
 		}
 
