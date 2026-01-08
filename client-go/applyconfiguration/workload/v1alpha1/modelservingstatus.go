@@ -30,6 +30,8 @@ type ModelServingStatusApplyConfiguration struct {
 	CurrentReplicas    *int32                           `json:"currentReplicas,omitempty"`
 	UpdatedReplicas    *int32                           `json:"updatedReplicas,omitempty"`
 	AvailableReplicas  *int32                           `json:"availableReplicas,omitempty"`
+	CurrentRevision    *string                          `json:"currentRevision,omitempty"`
+	UpdateRevision     *string                          `json:"updateRevision,omitempty"`
 	Conditions         []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	LabelSelector      *string                          `json:"labelSelector,omitempty"`
 }
@@ -77,6 +79,22 @@ func (b *ModelServingStatusApplyConfiguration) WithUpdatedReplicas(value int32) 
 // If called multiple times, the AvailableReplicas field is set to the value of the last call.
 func (b *ModelServingStatusApplyConfiguration) WithAvailableReplicas(value int32) *ModelServingStatusApplyConfiguration {
 	b.AvailableReplicas = &value
+	return b
+}
+
+// WithCurrentRevision sets the CurrentRevision field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the CurrentRevision field is set to the value of the last call.
+func (b *ModelServingStatusApplyConfiguration) WithCurrentRevision(value string) *ModelServingStatusApplyConfiguration {
+	b.CurrentRevision = &value
+	return b
+}
+
+// WithUpdateRevision sets the UpdateRevision field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the UpdateRevision field is set to the value of the last call.
+func (b *ModelServingStatusApplyConfiguration) WithUpdateRevision(value string) *ModelServingStatusApplyConfiguration {
+	b.UpdateRevision = &value
 	return b
 }
 

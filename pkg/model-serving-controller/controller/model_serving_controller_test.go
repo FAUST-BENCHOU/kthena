@@ -15,6 +15,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -2009,6 +2010,360 @@ func TestScaleDownServingGroups(t *testing.T) {
 				actualNames[i] = fmt.Sprintf("%d", idx)
 			}
 			assert.ElementsMatch(t, tt.expectedRemainingNames, actualNames, "Remaining group indices should match expected")
+		})
+	}
+}
+
+// TestModelServingVersionControl tests the version control functionality for ModelServing
+// This test verifies that when partition is set, deleted servingGroups below partition
+// can be recreated with their historical revision instead of the new revision.
+func TestModelServingVersionControl(t *testing.T) {
+	tests := []struct {
+		name                    string
+		partition               *int32
+		initialReplicas         int32
+		initialRevision         string
+		deletedOrdinals         []int // Ordinals of groups to delete
+		scaleUpTo               int32
+		expectedRecreatedRevs   map[int]string // ordinal -> expected revision for recreated groups
+		expectedCurrentRevision string
+		expectedUpdateRevision  string
+	}{
+		{
+			name:            "partition=2, create new group above partition should use new revision",
+			partition:       ptr.To[int32](2),
+			initialReplicas: 2, // R-0, R-1 (both < partition=2, protected)
+			initialRevision: "revision-v1",
+			deletedOrdinals: []int{}, // No deletion, just scale up
+			scaleUpTo:       4,       // Create new groups R-2, R-3 (both >= partition=2, not protected)
+			expectedRecreatedRevs: map[int]string{
+				2: "revision-v2", // Should use new revision (ordinal >= partition)
+				3: "revision-v2", // Should use new revision (ordinal >= partition)
+			},
+			expectedCurrentRevision: "revision-v1",
+			expectedUpdateRevision:  "revision-v2",
+		},
+		{
+			name:            "partition=2, delete protected group and create new group above partition",
+			partition:       ptr.To[int32](2),
+			initialReplicas: 3, // R-0, R-1, R-2 (R-0, R-1 < partition=2, R-2 >= partition=2)
+			initialRevision: "revision-v1",
+			deletedOrdinals: []int{1}, // Delete R-1 (ordinal=1 < partition=2, protected)
+			scaleUpTo:       4,        // Recreate R-1 and create R-3
+			expectedRecreatedRevs: map[int]string{
+				1: "revision-v1", // Should use historical revision (ordinal < partition, protected)
+				3: "revision-v2", // Should use new revision (ordinal >= partition, new group)
+			},
+			expectedCurrentRevision: "revision-v1",
+			expectedUpdateRevision:  "revision-v2",
+		},
+		{
+			name:            "no partition, recreated group should use new revision",
+			partition:       nil,
+			initialReplicas: 3,
+			initialRevision: "revision-v1",
+			deletedOrdinals: []int{2}, // Delete R-2
+			scaleUpTo:       3,        // Recreate R-2
+			expectedRecreatedRevs: map[int]string{
+				2: "revision-v2", // Recreated group, should use new revision (no partition, no history)
+			},
+			expectedCurrentRevision: "revision-v1",
+			expectedUpdateRevision:  "revision-v2",
+		},
+		{
+			name:            "partition=3, delete multiple groups below partition",
+			partition:       ptr.To[int32](3),
+			initialReplicas: 5,
+			initialRevision: "revision-v1",
+			deletedOrdinals: []int{1, 2}, // Delete R-1 and R-2 (both < partition=3)
+			scaleUpTo:       5,           // Recreate R-1 and R-2
+			expectedRecreatedRevs: map[int]string{
+				1: "revision-v1", // Should use historical revision
+				2: "revision-v1", // Should use historical revision
+			},
+			expectedCurrentRevision: "revision-v1",
+			expectedUpdateRevision:  "revision-v2",
+		},
+	}
+
+	for idx, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextfake := apiextfake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+			assert.NoError(t, err)
+
+			miName := fmt.Sprintf("test-version-control-%d", idx)
+			mi := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      miName,
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas:      ptr.To[int32](tt.initialReplicas),
+					SchedulerName: "volcano",
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "prefill",
+								Replicas: ptr.To[int32](1),
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{
+												Name:  "prefill-container",
+												Image: "test-image:latest",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: workloadv1alpha1.ServingGroupRollingUpdate,
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							Partition: tt.partition,
+						},
+					},
+				},
+			}
+
+			// Step 1: Create initial servingGroups with initial revision
+			for ordinal := int32(0); ordinal < tt.initialReplicas; ordinal++ {
+				controller.store.AddServingGroup(utils.GetNamespaceName(mi), int(ordinal), tt.initialRevision)
+			}
+
+			// Step 2: Delete specified groups and record their revision history using ControllerRevision
+			for _, deletedOrdinal := range tt.deletedOrdinals {
+				groupName := utils.GenerateServingGroupName(miName, deletedOrdinal)
+				group := controller.store.GetServingGroup(utils.GetNamespaceName(mi), groupName)
+				if group != nil {
+					// Record revision history using ControllerRevision before deletion
+					// Only for partition-protected groups
+					if tt.partition != nil && deletedOrdinal < int(*tt.partition) {
+						templateData := mi.Spec.Template.Roles
+						_, err := utils.CreateControllerRevision(context.Background(), controller.kubeClientSet, mi, deletedOrdinal, group.Revision, templateData)
+						assert.NoError(t, err, "Failed to create ControllerRevision for ordinal %d", deletedOrdinal)
+					}
+					// Delete from store (simulating deletion)
+					controller.store.DeleteServingGroup(utils.GetNamespaceName(mi), groupName)
+				}
+			}
+
+			// Step 3: Verify revision history was recorded for deleted groups below partition
+			if tt.partition != nil {
+				for _, deletedOrdinal := range tt.deletedOrdinals {
+					if deletedOrdinal < int(*tt.partition) {
+						// This group was deleted and is below partition, should have revision history in ControllerRevision
+						historicalRevision, err := utils.GetLatestControllerRevision(context.Background(), controller.kubeClientSet, mi, deletedOrdinal)
+						assert.NoError(t, err, "Failed to get revision history for ordinal %d", deletedOrdinal)
+						assert.Equal(t, tt.initialRevision, historicalRevision,
+							"Revision history should be recorded for deleted group at ordinal %d", deletedOrdinal)
+					}
+				}
+			}
+
+			// Step 4: Update ModelServing spec to trigger new revision
+			// Simulate a template change by using a new revision
+			newRevision := "revision-v2"
+			mi.Spec.Replicas = ptr.To(tt.scaleUpTo)
+
+			// Step 5: Scale up (should use historical revision for protected groups below partition, new revision for groups above partition)
+			groupsAfterScaleDown, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
+			// Handle case where no groups exist after scale down
+			if err != nil {
+				if errors.Is(err, datastore.ErrServingGroupNotFound) {
+					groupsAfterScaleDown = []datastore.ServingGroup{}
+				} else {
+					assert.NoError(t, err)
+				}
+			}
+			err = controller.scaleUpServingGroups(context.Background(), mi, groupsAfterScaleDown, int(tt.scaleUpTo), newRevision)
+			assert.NoError(t, err)
+
+			// Step 6: Verify created/recreated groups have correct revisions
+			for ordinal, expectedRevision := range tt.expectedRecreatedRevs {
+				groupName := utils.GenerateServingGroupName(miName, ordinal)
+				group := controller.store.GetServingGroup(utils.GetNamespaceName(mi), groupName)
+				assert.NotNil(t, group, "Group at ordinal %d should exist", ordinal)
+				if group != nil {
+					assert.Equal(t, expectedRevision, group.Revision,
+						"Group at ordinal %d should have revision %s, got %s", ordinal, expectedRevision, group.Revision)
+				}
+			}
+
+			// Step 8: Verify status revisions
+			// Create ModelServing in API server first
+			_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(context.Background(), mi, metav1.CreateOptions{})
+			assert.NoError(t, err)
+
+			err = controller.UpdateModelServingStatus(mi, newRevision)
+			assert.NoError(t, err)
+
+			// Get updated ModelServing to check status
+			updatedMI, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Get(context.Background(), miName, metav1.GetOptions{})
+			assert.NoError(t, err)
+			if tt.expectedCurrentRevision != "" {
+				assert.Equal(t, tt.expectedCurrentRevision, updatedMI.Status.CurrentRevision,
+					"CurrentRevision should match expected")
+			}
+			if tt.expectedUpdateRevision != "" {
+				assert.Equal(t, tt.expectedUpdateRevision, updatedMI.Status.UpdateRevision,
+					"UpdateRevision should match expected")
+			}
+		})
+	}
+}
+
+// TestUpdateModelServingStatusRevisionFields tests the CurrentRevision and UpdateRevision logic
+// following StatefulSet's behavior
+func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
+	tests := []struct {
+		name                    string
+		existingGroups          map[int]string // ordinal -> revision
+		statusCurrentRevision   string         // Existing CurrentRevision in status
+		newRevision             string         // New revision being applied
+		expectedCurrentRevision string
+		expectedUpdateRevision  string
+		description             string
+	}{
+		{
+			name: "no existing CurrentRevision, compute from groups",
+			existingGroups: map[int]string{
+				0: "revision-v1",
+				1: "revision-v1",
+				2: "revision-v1",
+			},
+			statusCurrentRevision:   "",
+			newRevision:             "revision-v2",
+			expectedCurrentRevision: "revision-v1", // Most common non-updated revision
+			expectedUpdateRevision:  "revision-v2",
+			description:             "When Status.CurrentRevision is empty, should compute from current groups",
+		},
+		{
+			name: "existing CurrentRevision is valid, should keep it",
+			existingGroups: map[int]string{
+				0: "revision-v1",
+				1: "revision-v1",
+				2: "revision-v2", // Updated
+			},
+			statusCurrentRevision:   "revision-v1",
+			newRevision:             "revision-v2",
+			expectedCurrentRevision: "revision-v1", // Should keep existing CurrentRevision
+			expectedUpdateRevision:  "revision-v2",
+			description:             "When Status.CurrentRevision exists and is still valid, should keep it",
+		},
+		{
+			name: "all groups updated, CurrentRevision should equal UpdateRevision",
+			existingGroups: map[int]string{
+				0: "revision-v2", // All updated
+				1: "revision-v2",
+				2: "revision-v2",
+			},
+			statusCurrentRevision:   "revision-v1", // Invalid, not used by any group
+			newRevision:             "revision-v2",
+			expectedCurrentRevision: "revision-v2", // Should equal UpdateRevision when all updated
+			expectedUpdateRevision:  "revision-v2",
+			description:             "When all groups are updated, CurrentRevision should equal UpdateRevision (invalid CurrentRevision should be recomputed)",
+		},
+		{
+			name: "multiple old revisions, should use most common",
+			existingGroups: map[int]string{
+				0: "revision-v1",
+				1: "revision-v1",
+				2: "revision-v0", // Less common
+				3: "revision-v2", // Updated
+			},
+			statusCurrentRevision:   "",
+			newRevision:             "revision-v2",
+			expectedCurrentRevision: "revision-v1", // Most common (2 groups)
+			expectedUpdateRevision:  "revision-v2",
+			description:             "When multiple old revisions exist, should use the most common one",
+		},
+		{
+			name:                    "no groups exist",
+			existingGroups:          map[int]string{},
+			statusCurrentRevision:   "",
+			newRevision:             "revision-v1",
+			expectedCurrentRevision: "revision-v1", // Should equal UpdateRevision
+			expectedUpdateRevision:  "revision-v1",
+			description:             "When no groups exist, CurrentRevision should equal UpdateRevision",
+		},
+	}
+
+	for idx, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextfake := apiextfake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+			assert.NoError(t, err)
+
+			miName := fmt.Sprintf("test-revision-fields-%d", idx)
+			mi := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      miName,
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas:      ptr.To(int32(len(tt.existingGroups))),
+					SchedulerName: "volcano",
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "prefill",
+								Replicas: ptr.To[int32](1),
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{
+												Name:  "prefill-container",
+												Image: "test-image:latest",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+				},
+				Status: workloadv1alpha1.ModelServingStatus{
+					CurrentRevision: tt.statusCurrentRevision,
+				},
+			}
+
+			// Create ModelServing in API server
+			_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(context.Background(), mi, metav1.CreateOptions{})
+			assert.NoError(t, err)
+
+			// Create servingGroups with specified revisions
+			for ordinal, revision := range tt.existingGroups {
+				controller.store.AddServingGroup(utils.GetNamespaceName(mi), ordinal, revision)
+				// Mark groups as Running to simulate real scenario
+				groupName := utils.GenerateServingGroupName(miName, ordinal)
+				controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), groupName, datastore.ServingGroupRunning)
+			}
+
+			// Call UpdateModelServingStatus
+			err = controller.UpdateModelServingStatus(mi, tt.newRevision)
+			assert.NoError(t, err)
+
+			// Get updated ModelServing to check status
+			updatedMI, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Get(context.Background(), miName, metav1.GetOptions{})
+			assert.NoError(t, err)
+
+			assert.Equal(t, tt.expectedCurrentRevision, updatedMI.Status.CurrentRevision,
+				"CurrentRevision: %s", tt.description)
+			assert.Equal(t, tt.expectedUpdateRevision, updatedMI.Status.UpdateRevision,
+				"UpdateRevision: %s", tt.description)
 		})
 	}
 }

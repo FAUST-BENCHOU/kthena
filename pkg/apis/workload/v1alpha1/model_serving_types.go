@@ -58,6 +58,14 @@ type ModelServingSpec struct {
 	// +kubebuilder:validation:Enum={ServingGroupRecreate,RoleRecreate,None}
 	// +optional
 	RecoveryPolicy RecoveryPolicy `json:"recoveryPolicy,omitempty"`
+
+	// RevisionHistoryLimit is the maximum number of ControllerRevisions that will be kept per ordinal.
+	// Each revision represents a historical version of the template used for a specific ordinal.
+	// This field is similar to StatefulSet's RevisionHistoryLimit.
+	// Defaults to 10 if not specified.
+	// +optional
+	// +kubebuilder:default=10
+	RevisionHistoryLimit *int32 `json:"revisionHistoryLimit,omitempty"`
 }
 
 type RecoveryPolicy string
@@ -165,6 +173,16 @@ type ModelServingStatus struct {
 
 	// AvailableReplicas track the number of ServingGroup that are in ready state (updated or not).
 	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
+
+	// CurrentRevision indicates the version of the ModelServing template used to generate ServingGroups
+	// that are not being updated.
+	// +optional
+	CurrentRevision string `json:"currentRevision,omitempty"`
+
+	// UpdateRevision indicates the version of the ModelServing template used to generate ServingGroups
+	// that are being updated.
+	// +optional
+	UpdateRevision string `json:"updateRevision,omitempty"`
 
 	// Conditions track the condition of the ModelServing.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

@@ -56,6 +56,15 @@ spec:
                   Default to 1.
                 format: int32
                 type: integer
+              revisionHistoryLimit:
+                default: 10
+                description: |-
+                  RevisionHistoryLimit is the maximum number of ControllerRevisions that will be kept per ordinal.
+                  Each revision represents a historical version of the template used for a specific ordinal.
+                  This field is similar to StatefulSet's RevisionHistoryLimit.
+                  Defaults to 10 if not specified.
+                format: int32
+                type: integer
               rolloutStrategy:
                 description: RolloutStrategy defines the strategy that will be applied
                   to update replicas
@@ -17597,6 +17606,11 @@ spec:
                   by the ModelServing controller from the ModelServing version
                 format: int32
                 type: integer
+              currentRevision:
+                description: |-
+                  CurrentRevision indicates the version of the ModelServing template used to generate ServingGroups
+                  that are not being updated.
+                type: string
               labelSelector:
                 description: LabelSelector is a label query over pods that should
                   match the replica count.
@@ -17612,6 +17626,11 @@ spec:
                   have been created (updated or not, ready or not)
                 format: int32
                 type: integer
+              updateRevision:
+                description: |-
+                  UpdateRevision indicates the version of the ModelServing template used to generate ServingGroups
+                  that are being updated.
+                type: string
               updatedReplicas:
                 description: UpdatedReplicas track the number of ServingGroup that
                   have been updated (ready or not).
