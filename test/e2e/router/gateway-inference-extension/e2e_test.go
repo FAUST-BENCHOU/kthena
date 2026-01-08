@@ -392,6 +392,7 @@ func TestAccessLogGatewayInfo(t *testing.T) {
 	t.Log("Verifying access logs...")
 	allLogs, err := utils.GetPodLogs(ctx, testCtx.KubeClient, kthenaNamespace, routerPod.Name, "", &beforeTime)
 	require.NoError(t, err, "Failed to get pod logs after request")
+	t.Logf("All logs: %s", allLogs)
 
 	// Find new log entries since beforeTime
 	newLogs := strings.TrimPrefix(allLogs, beforeLogs)
