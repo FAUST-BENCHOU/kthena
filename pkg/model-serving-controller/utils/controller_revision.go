@@ -41,8 +41,8 @@ const (
 	ControllerRevisionOrdinalLabelKey = "modelserving.volcano.sh/ordinal"
 	// ControllerRevisionRevisionLabelKey is the label key for revision
 	ControllerRevisionRevisionLabelKey = workloadv1alpha1.RevisionLabelKey
-	// MaxRevisionHistory is the maximum number of ControllerRevisions to keep per ordinal
-	MaxRevisionHistory = 10
+	// DefaultRevisionHistoryLimit is the default maximum number of ControllerRevisions to keep per ordinal
+	DefaultRevisionHistoryLimit = int32(10)
 )
 
 // CreateControllerRevision creates a ControllerRevision for a specific ordinal and revision
@@ -74,6 +74,10 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 				return nil, fmt.Errorf("failed to update ControllerRevision: %v", updateErr)
 			}
 			klog.V(4).Infof("Updated ControllerRevision %s/%s for ordinal %d with revision %s", mi.Namespace, revisionName, ordinal, revision)
+			// Clean up old revisions after updating (data changed, effectively a new revision)
+			if cleanupErr := CleanupOldControllerRevisions(ctx, client, mi); cleanupErr != nil {
+				klog.Warningf("Failed to cleanup old ControllerRevisions after updating revision for ModelServing %s/%s: %v", mi.Namespace, mi.Name, cleanupErr)
+			}
 			return updated, nil
 		}
 		return existing, nil
@@ -108,6 +112,10 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 	}
 
 	klog.V(4).Infof("Created ControllerRevision %s/%s for ordinal %d with revision %s", mi.Namespace, revisionName, ordinal, revision)
+	// Clean up old revisions after creating a new one
+	if cleanupErr := CleanupOldControllerRevisions(ctx, client, mi); cleanupErr != nil {
+		klog.Warningf("Failed to cleanup old ControllerRevisions after creating revision for ModelServing %s/%s: %v", mi.Namespace, mi.Name, cleanupErr)
+	}
 	return created, nil
 }
 
@@ -163,12 +171,24 @@ func GetLatestControllerRevision(ctx context.Context, client kubernetes.Interfac
 	return revision, nil
 }
 
-// CleanupOldControllerRevisions deletes old ControllerRevisions, keeping only the most recent MaxRevisionHistory per ordinal
+// CleanupOldControllerRevisions deletes old ControllerRevisions, keeping only the most recent limit per ordinal.
+// The limit is taken from mi.Spec.RevisionHistoryLimit, or defaults to DefaultRevisionHistoryLimit if not specified.
 func CleanupOldControllerRevisions(
 	ctx context.Context,
 	client kubernetes.Interface,
 	mi *workloadv1alpha1.ModelServing,
 ) error {
+	// Get revision history limit from spec, or use default
+	limit := DefaultRevisionHistoryLimit
+	if mi.Spec.RevisionHistoryLimit != nil {
+		limit = *mi.Spec.RevisionHistoryLimit
+	}
+
+	// If limit is 0 or negative, don't clean up (similar to StatefulSet behavior where 0 means unlimited)
+	if limit <= 0 {
+		return nil
+	}
+
 	// Get all ControllerRevisions for this ModelServing
 	selector := labels.SelectorFromSet(map[string]string{
 		ControllerRevisionLabelKey: mi.Name,
@@ -196,7 +216,7 @@ func CleanupOldControllerRevisions(
 		ordinalRevisions[ordinal] = append(ordinalRevisions[ordinal], &list.Items[i])
 	}
 
-	// For each ordinal, keep only the most recent MaxRevisionHistory
+	// For each ordinal, keep only the most recent limit
 	for ordinal, revisions := range ordinalRevisions {
 		// Sort by creation time (newest first)
 		sort.Slice(revisions, func(i, j int) bool {
@@ -204,8 +224,8 @@ func CleanupOldControllerRevisions(
 		})
 
 		// Delete old revisions
-		if len(revisions) > MaxRevisionHistory {
-			for i := MaxRevisionHistory; i < len(revisions); i++ {
+		if len(revisions) > int(limit) {
+			for i := int(limit); i < len(revisions); i++ {
 				err := client.AppsV1().ControllerRevisions(mi.Namespace).Delete(ctx, revisions[i].Name, metav1.DeleteOptions{})
 				if err != nil && !apierrors.IsNotFound(err) {
 					klog.Warningf("Failed to delete old ControllerRevision %s/%s: %v", mi.Namespace, revisions[i].Name, err)

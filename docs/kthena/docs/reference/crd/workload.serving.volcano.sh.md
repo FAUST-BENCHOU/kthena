@@ -507,6 +507,7 @@ _Appears in:_
 | `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
 | `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
+| `revisionHistoryLimit` _integer_ | RevisionHistoryLimit is the maximum number of ControllerRevisions that will be kept per ordinal.<br />Each revision represents a historical version of the template used for a specific ordinal.<br />This field is similar to StatefulSet's RevisionHistoryLimit.<br />Defaults to 10 if not specified. | 10 |  |
 
 
 #### ModelServingStatus

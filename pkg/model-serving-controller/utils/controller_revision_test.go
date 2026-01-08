@@ -206,8 +206,9 @@ func TestCleanupOldControllerRevisions(t *testing.T) {
 	templateData := mi.Spec.Template.Roles
 	ordinal := 0
 
-	// Create more than MaxRevisionHistory (10) ControllerRevisions
+	// Create more than DefaultRevisionHistoryLimit (10) ControllerRevisions
 	// Create 15 revisions to test cleanup
+	// Note: Cleanup is now automatic in CreateControllerRevision, so we test the final state
 	for i := 0; i < 15; i++ {
 		if i > 0 {
 			time.Sleep(10 * time.Millisecond)
@@ -217,25 +218,16 @@ func TestCleanupOldControllerRevisions(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	// Verify we have 15 ControllerRevisions
-	historyBefore, err := GetControllerRevisionHistory(ctx, client, mi, ordinal)
-	assert.NoError(t, err)
-	assert.Equal(t, 15, len(historyBefore), "Should have 15 ControllerRevisions before cleanup")
-
-	// Run cleanup
-	err = CleanupOldControllerRevisions(ctx, client, mi)
-	assert.NoError(t, err)
-
-	// Verify only MaxRevisionHistory (10) are kept
+	// Verify only DefaultRevisionHistoryLimit (10) are kept after creating all revisions
+	// (cleanup happens automatically after each creation)
 	historyAfter, err := GetControllerRevisionHistory(ctx, client, mi, ordinal)
 	assert.NoError(t, err)
-	assert.Equal(t, MaxRevisionHistory, len(historyAfter), "Should have exactly %d ControllerRevisions after cleanup", MaxRevisionHistory)
+	assert.Equal(t, int(DefaultRevisionHistoryLimit), len(historyAfter), "Should have exactly %d ControllerRevisions after creating all revisions", DefaultRevisionHistoryLimit)
 
 	// Verify the kept revisions are the most recent ones
 	// Since fake client may have equal timestamps, we verify:
-	// 1. We have exactly MaxRevisionHistory revisions
+	// 1. We have exactly DefaultRevisionHistoryLimit revisions
 	// 2. All revisions are from the created set (v1 to v15)
-	// 3. The cleanup happened (we went from 15 to 10)
 	revisionSet := make(map[string]bool)
 	for _, cr := range historyAfter {
 		rev := cr.Labels[ControllerRevisionRevisionLabelKey]
@@ -243,7 +235,7 @@ func TestCleanupOldControllerRevisions(t *testing.T) {
 		// Verify revision is in expected range (v6 to v15, or v1 to v15 if timestamps are equal)
 		assert.True(t, len(rev) > 0, "Revision should not be empty")
 	}
-	assert.Equal(t, MaxRevisionHistory, len(revisionSet), "Should have exactly %d unique revisions", MaxRevisionHistory)
+	assert.Equal(t, int(DefaultRevisionHistoryLimit), len(revisionSet), "Should have exactly %d unique revisions", DefaultRevisionHistoryLimit)
 }
 
 func TestCleanupOldControllerRevisions_MultipleOrdinals(t *testing.T) {
@@ -293,18 +285,18 @@ func TestCleanupOldControllerRevisions_MultipleOrdinals(t *testing.T) {
 	err := CleanupOldControllerRevisions(ctx, client, mi)
 	assert.NoError(t, err)
 
-	// Verify cleanup results
-	// Ordinal 0: should have 10 (MaxRevisionHistory)
+	// Verify cleanup results (cleanup happens automatically after each creation)
+	// Ordinal 0: should have 10 (DefaultRevisionHistoryLimit)
 	history0, err := GetControllerRevisionHistory(ctx, client, mi, 0)
 	assert.NoError(t, err)
-	assert.Equal(t, MaxRevisionHistory, len(history0), "Ordinal 0 should have %d revisions", MaxRevisionHistory)
+	assert.Equal(t, int(DefaultRevisionHistoryLimit), len(history0), "Ordinal 0 should have %d revisions", DefaultRevisionHistoryLimit)
 
-	// Ordinal 1: should have 10 (MaxRevisionHistory)
+	// Ordinal 1: should have 10 (DefaultRevisionHistoryLimit)
 	history1, err := GetControllerRevisionHistory(ctx, client, mi, 1)
 	assert.NoError(t, err)
-	assert.Equal(t, MaxRevisionHistory, len(history1), "Ordinal 1 should have %d revisions", MaxRevisionHistory)
+	assert.Equal(t, int(DefaultRevisionHistoryLimit), len(history1), "Ordinal 1 should have %d revisions", DefaultRevisionHistoryLimit)
 
-	// Ordinal 2: should have 5 (less than MaxRevisionHistory, so all kept)
+	// Ordinal 2: should have 5 (less than DefaultRevisionHistoryLimit, so all kept)
 	history2, err := GetControllerRevisionHistory(ctx, client, mi, 2)
 	assert.NoError(t, err)
 	assert.Equal(t, 5, len(history2), "Ordinal 2 should have 5 revisions (all kept)")

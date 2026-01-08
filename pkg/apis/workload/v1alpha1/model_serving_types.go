@@ -58,6 +58,14 @@ type ModelServingSpec struct {
 	// +kubebuilder:validation:Enum={ServingGroupRecreate,RoleRecreate,None}
 	// +optional
 	RecoveryPolicy RecoveryPolicy `json:"recoveryPolicy,omitempty"`
+
+	// RevisionHistoryLimit is the maximum number of ControllerRevisions that will be kept per ordinal.
+	// Each revision represents a historical version of the template used for a specific ordinal.
+	// This field is similar to StatefulSet's RevisionHistoryLimit.
+	// Defaults to 10 if not specified.
+	// +optional
+	// +kubebuilder:default=10
+	RevisionHistoryLimit *int32 `json:"revisionHistoryLimit,omitempty"`
 }
 
 type RecoveryPolicy string

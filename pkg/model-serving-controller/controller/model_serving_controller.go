@@ -457,12 +457,6 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return fmt.Errorf("failed to update status of mi %s/%s: %v", namespace, name, err)
 	}
 
-	// Periodically clean up old ControllerRevisions (keep only the most recent MaxRevisionHistory per ordinal)
-	// This is done on every sync to ensure we don't accumulate too many revisions
-	if err := utils.CleanupOldControllerRevisions(ctx, c.kubeClientSet, mi); err != nil {
-		klog.Warningf("Failed to cleanup old ControllerRevisions for ModelServing %s/%s: %v", namespace, name, err)
-	}
-
 	return nil
 }
 
