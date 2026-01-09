@@ -289,16 +289,6 @@ func PodRevision(pod *corev1.Pod) string {
 	return pod.Labels[workloadv1alpha1.RevisionLabelKey]
 }
 
-// PodRoleName returns the role name of the pod.
-func PodRoleName(pod *corev1.Pod) string {
-	return pod.Labels[workloadv1alpha1.RoleLabelKey]
-}
-
-// PodRoleID returns the role id of the pod.
-func PodRoleID(pod *corev1.Pod) string {
-	return pod.Labels[workloadv1alpha1.RoleIDKey]
-}
-
 func isPodReady(pod *corev1.Pod) bool {
 	return isPodReadyConditionTrue(pod.Status)
 }
