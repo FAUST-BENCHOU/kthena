@@ -26,46 +26,10 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	listerv1 "k8s.io/client-go/listers/core/v1"
+	kubeinformers "k8s.io/client-go/informers"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 )
-
-type fakePodLister struct {
-	pods []*corev1.Pod
-}
-
-func (f *fakePodLister) List(selector labels.Selector) ([]*corev1.Pod, error) {
-	return f.pods, nil
-}
-
-func (f *fakePodLister) Pods(namespace string) listerv1.PodNamespaceLister {
-	return &fakePodNamespaceLister{pods: f.pods, namespace: namespace}
-}
-
-type fakePodNamespaceLister struct {
-	pods      []*corev1.Pod
-	namespace string
-}
-
-func (f *fakePodNamespaceLister) List(selector labels.Selector) ([]*corev1.Pod, error) {
-	var filtered []*corev1.Pod
-	for _, pod := range f.pods {
-		if pod.Namespace == f.namespace && selector.Matches(labels.Set(pod.Labels)) {
-			filtered = append(filtered, pod)
-		}
-	}
-	return filtered, nil
-}
-
-func (f *fakePodNamespaceLister) Get(name string) (*corev1.Pod, error) {
-	for _, p := range f.pods {
-		if p.Namespace == f.namespace && p.Name == name {
-			return p, nil
-		}
-	}
-	return nil, nil
-}
 
 func TestGetRoleName(t *testing.T) {
 	ref := &corev1.ObjectReference{Name: "role/sub"}
@@ -123,16 +87,23 @@ func TestGetMetricPods(t *testing.T) {
 		},
 	}
 
-	lister := &fakePodLister{
-		pods: []*corev1.Pod{pod1, pod2},
-	}
+	// Use k8s fake client
+	kubeClient := kubefake.NewSimpleClientset(pod1, pod2)
+
+	// Create informer factory and get lister
+	informerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
+	podLister := informerFactory.Core().V1().Pods().Lister()
+
+	// Start informers
+	informerFactory.Start(nil)
+	informerFactory.WaitForCacheSync(nil)
 
 	target := &workload.Target{}
 	target.TargetRef.Name = "model1"
 	target.TargetRef.Kind = workload.ModelServingKind.Kind
 
 	// Test filtering by "default" namespace
-	pods, err := GetMetricPods(lister, "default", target)
+	pods, err := GetMetricPods(podLister, "default", target)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +115,7 @@ func TestGetMetricPods(t *testing.T) {
 	}
 
 	// Test filtering by "other-namespace"
-	pods, err = GetMetricPods(lister, "other-namespace", target)
+	pods, err = GetMetricPods(podLister, "other-namespace", target)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -156,7 +127,7 @@ func TestGetMetricPods(t *testing.T) {
 	}
 
 	// Test filtering by non-existent namespace
-	pods, err = GetMetricPods(lister, "non-existent", target)
+	pods, err = GetMetricPods(podLister, "non-existent", target)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
