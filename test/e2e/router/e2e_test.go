@@ -127,3 +127,9 @@ func TestModelRouteSubset(t *testing.T) {
 func TestModelRouteWithRateLimit(t *testing.T) {
 	TestModelRouteWithRateLimitShared(t, testCtx, testNamespace, false, "")
 }
+
+// TestModelRouteLora tests ModelRoute with LoRA adapter routing.
+// This test runs the shared test function without Gateway API (no ParentRefs).
+func TestModelRouteLora(t *testing.T) {
+	TestModelRouteLoraShared(t, testCtx, testNamespace, false, "")
+}
