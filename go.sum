@@ -385,3 +385,4 @@ sigs.k8s.io/yaml v1.6.0 h1:G8fkbMSAFqgEFgh4b1wmtzDnioxFCUgTZhlbj5P9QYs=
 sigs.k8s.io/yaml v1.6.0/go.mod h1:796bPqUfzR/0jLAl6XjHl3Ck7MiyVv8dbTdyT3/pMf4=
 volcano.sh/apis v0.0.0-20251222111824-40fed4793a6f h1:nz/f+P5eZCojrxqrQ2Hgk+GzxB9apaJHI9UU1W6+Fps=
 volcano.sh/apis v0.0.0-20251222111824-40fed4793a6f/go.mod h1:CKQbxVt0o4lTKisC0MonoXWruGFC0S8KU+UuzaZ5E7k=
+volcano.sh/apis v1.12.1/go.mod h1:0XNNnIOevJSYNiXRmwhXUrYCcCcWcBeTY0nxrlkk03A=

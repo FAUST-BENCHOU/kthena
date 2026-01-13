@@ -167,51 +167,9 @@ spec:
                       groupPolicy:
                         description: GroupPolicy defines the network topology scheduling
                           requirement of  all the instances within the `ServingGroup`.
-                        properties:
-                          highestTierAllowed:
-                            description: HighestTierAllowed specifies the highest
-                              tier that a job allowed to cross when scheduling.
-                            minimum: 0
-                            type: integer
-                          highestTierName:
-                            description: |-
-                              HighestTierName specifies the highest tier name that a job allowed to cross when scheduling.
-                              HighestTierName and HighestTierAllowed cannot be set simultaneously.
-                            maxLength: 253
-                            type: string
-                          mode:
-                            default: hard
-                            description: Mode specifies the mode of the network topology
-                              constrain.
-                            enum:
-                            - hard
-                            - soft
-                            type: string
-                        type: object
                       rolePolicy:
                         description: RolePolicy defines the fine-grained network topology
                           scheduling requirement for instances of a `role`.
-                        properties:
-                          highestTierAllowed:
-                            description: HighestTierAllowed specifies the highest
-                              tier that a job allowed to cross when scheduling.
-                            minimum: 0
-                            type: integer
-                          highestTierName:
-                            description: |-
-                              HighestTierName specifies the highest tier name that a job allowed to cross when scheduling.
-                              HighestTierName and HighestTierAllowed cannot be set simultaneously.
-                            maxLength: 253
-                            type: string
-                          mode:
-                            default: hard
-                            description: Mode specifies the mode of the network topology
-                              constrain.
-                            enum:
-                            - hard
-                            - soft
-                            type: string
-                        type: object
                     type: object
                   restartGracePeriodSeconds:
                     default: 0
