@@ -61,8 +61,8 @@ func InitializeLWSController(
 		return nil, fmt.Errorf("failed to create lws client: %v", err)
 	}
 
-	lwsInformerFactory := lwsinformers.NewSharedInformerFactory(lwsClient, time.Second*30)
-	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(kthenaClient, time.Second*30)
+	lwsInformerFactory := lwsinformers.NewSharedInformerFactory(lwsClient, 0)
+	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(kthenaClient, 0)
 
 	controller, err := NewLWSController(kubeClient, kthenaClient, lwsClient, lwsInformerFactory, kthenaInformerFactory)
 	if err != nil {

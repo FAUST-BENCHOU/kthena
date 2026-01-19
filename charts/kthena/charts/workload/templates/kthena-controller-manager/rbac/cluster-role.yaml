@@ -158,3 +158,9 @@ rules:
       - list
       - watch
       - update
+  - apiGroups:
+      - ""
+    resources:
+      - apiresources
+    verbs:
+      - get
