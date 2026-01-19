@@ -3663,6 +3663,7 @@ func TestManageHeadlessService(t *testing.T) {
 		modelServing         *workloadv1alpha1.ModelServing
 		existingRoles        []datastore.Role
 		existingServices     []*corev1.Service
+		servingGroupStatus   datastore.ServingGroupStatus
 		expectedServiceCount int
 		expectServiceCreated bool
 	}{
@@ -3701,6 +3702,7 @@ func TestManageHeadlessService(t *testing.T) {
 				{Name: "prefill-1", Status: datastore.RoleRunning, Revision: "v1"},
 			},
 			existingServices:     []*corev1.Service{},
+			servingGroupStatus:   datastore.ServingGroupRunning,
 			expectedServiceCount: 2, // One for each role
 			expectServiceCreated: true,
 		},
@@ -3750,6 +3752,7 @@ func TestManageHeadlessService(t *testing.T) {
 					},
 				},
 			},
+			servingGroupStatus:   datastore.ServingGroupRunning,
 			expectedServiceCount: 1,
 			expectServiceCreated: false,
 		},
@@ -3778,6 +3781,7 @@ func TestManageHeadlessService(t *testing.T) {
 				{Name: "prefill-0", Status: datastore.RoleRunning, Revision: "v1"},
 			},
 			existingServices:     []*corev1.Service{},
+			servingGroupStatus:   datastore.ServingGroupRunning,
 			expectedServiceCount: 0,
 			expectServiceCreated: false,
 		},
@@ -3815,6 +3819,45 @@ func TestManageHeadlessService(t *testing.T) {
 				{Name: "prefill-0", Status: datastore.RoleDeleting, Revision: "v1"}, // Role is deleting
 			},
 			existingServices:     []*corev1.Service{},
+			servingGroupStatus:   datastore.ServingGroupRunning,
+			expectedServiceCount: 0,
+			expectServiceCreated: false,
+		},
+		{
+			name: "skip creating service for deleting serving group",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-ms",
+					Namespace: "default",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:           "prefill",
+								Replicas:       ptr.To[int32](1),
+								WorkerReplicas: 1,
+								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{
+											{
+												Name:  "container",
+												Image: "nginx",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRoles: []datastore.Role{
+				{Name: "prefill-0", Status: datastore.RoleRunning, Revision: "v1"},
+			},
+			existingServices:     []*corev1.Service{},
+			servingGroupStatus:   datastore.ServingGroupDeleting,
 			expectedServiceCount: 0,
 			expectServiceCreated: false,
 		},
@@ -3835,6 +3878,8 @@ func TestManageHeadlessService(t *testing.T) {
 			// Setup the datastore with serving groups and roles
 			groupName := utils.GenerateServingGroupName(tt.modelServing.Name, 0)
 			controller.store.AddServingGroup(utils.GetNamespaceName(tt.modelServing), 0, "v1")
+			err = controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(tt.modelServing), groupName, tt.servingGroupStatus)
+			assert.NoError(t, err)
 
 			for _, role := range tt.existingRoles {
 				controller.store.AddRole(utils.GetNamespaceName(tt.modelServing), groupName, "prefill", role.Name, role.Revision)

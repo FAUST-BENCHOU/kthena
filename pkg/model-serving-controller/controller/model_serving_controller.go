@@ -140,21 +140,39 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		},
 	})
 
-	_, _ = c.podsInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			c.addPod(obj)
+	_, _ = c.podsInformer.AddEventHandler(cache.FilteringResourceEventHandler{
+		FilterFunc: func(obj interface{}) bool {
+			metaObj := getMetaObject(obj)
+			if metaObj == nil {
+				return false
+			}
+			return isOwnedByModelServing(metaObj)
 		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			c.updatePod(oldObj, newObj)
-		},
-		DeleteFunc: func(obj interface{}) {
-			c.deletePod(obj)
+		Handler: cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				c.addPod(obj)
+			},
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				c.updatePod(oldObj, newObj)
+			},
+			DeleteFunc: func(obj interface{}) {
+				c.deletePod(obj)
+			},
 		},
 	})
 
-	_, _ = c.servicesInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		DeleteFunc: func(obj interface{}) {
-			c.deleteService(obj)
+	_, _ = c.servicesInformer.AddEventHandler(cache.FilteringResourceEventHandler{
+		FilterFunc: func(obj interface{}) bool {
+			metaObj := getMetaObject(obj)
+			if metaObj == nil {
+				return false
+			}
+			return isOwnedByModelServing(metaObj)
+		},
+		Handler: cache.ResourceEventHandlerFuncs{
+			DeleteFunc: func(obj interface{}) {
+				c.deleteService(obj)
+			},
 		},
 	})
 
@@ -231,7 +249,7 @@ func (c *ModelServingController) addPod(obj interface{}) {
 	c.updatePod(nil, obj)
 }
 
-func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
+func (c *ModelServingController) updatePod(_, newObj interface{}) {
 	newPod, ok := newObj.(*corev1.Pod)
 	if !ok {
 		klog.Error("failed to parse newPod type when updatePod")
@@ -301,34 +319,15 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	if ms == nil {
 		return
 	}
-
-	// check ServingGroup status
-	if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName) == datastore.ServingGroupDeleting {
-		// ServingGroup is already in the deletion process, only checking whether the deletion is completed
-		if c.isServingGroupDeleted(ms, servingGroupName) {
-			// ServingGroup has been deleted, so the storage needs to be updated and need to reconcile.
-			klog.V(2).Infof("servingGroup %s has been deleted", servingGroupName)
-			c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroupName)
-			c.enqueueModelServing(ms)
-		}
-		return
-	}
-
+	// Remove the pod from running pods in the store
 	c.store.DeleteRunningPodFromServingGroup(utils.GetNamespaceName(ms), servingGroupName, pod.Name)
 
-	// check role status
-	if c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID) == datastore.RoleDeleting {
-		// role is already in the deletion process, only checking whether the deletion is completed
-		if c.isRoleDeleted(ms, servingGroupName, utils.GetRoleName(pod), utils.GetRoleID(pod)) {
-			// role has been deleted, so the storage needs to be updated and need to reconcile.
-			klog.V(2).Infof("role %s of servingGroup %s has been deleted", utils.GetRoleID(pod), servingGroupName)
-			c.store.DeleteRole(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID)
-			c.enqueueModelServing(ms)
-		}
+	// skip handling if pod revision mismatches serving group revision
+	if c.shouldSkipPodHandling(ms, servingGroupName, pod) {
 		return
 	}
 
-	if c.shouldSkipPodHandling(ms, servingGroupName, pod) {
+	if c.handleDeletionInProgress(ms, servingGroupName, roleName, roleID) {
 		return
 	}
 
@@ -354,37 +353,18 @@ func (c *ModelServingController) deleteService(obj interface{}) {
 		}
 	}
 
-	var modelServingName string
-	foundOwner := false
-	for _, ownerRef := range svc.GetOwnerReferences() {
-		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && ownerRef.Kind == "ModelServing" {
-			modelServingName = ownerRef.Name
-			foundOwner = true
-			break
-		}
-	}
-
-	if !foundOwner {
-		// This service is not owned by ModelServing controller
-		return
-	}
-
 	ms, servingGroupName, roleName, roleID := c.getModelServingAndResourceDetails(svc)
 	// ms is nil means the modelserving is deleted
-	// delete the service
 	if ms == nil {
 		return
 	}
-	// check role status
-	// If role is deletion, means the deletion of the svc is a normal occurrence.
-	// Not reconcile
-	if c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID) == datastore.RoleDeleting {
+
+	if c.handleDeletionInProgress(ms, servingGroupName, roleName, roleID) {
 		return
 	}
 
-	klog.V(4).Infof("Service %s/%s deleted, enqueuing ModelServing %s for reconcile", svc.GetNamespace(), svc.GetName(), modelServingName)
-	msKey := fmt.Sprintf("%s/%s", svc.GetNamespace(), modelServingName)
-	c.workqueue.Add(msKey)
+	klog.V(4).Infof("Service %s/%s deleted, enqueuing ModelServing %s for reconcile", svc.GetNamespace(), svc.GetName(), ms.Name)
+	c.enqueueModelServing(ms)
 }
 
 func (c *ModelServingController) enqueueModelServing(ms *workloadv1alpha1.ModelServing) {
@@ -1139,7 +1119,7 @@ func (c *ModelServingController) getModelServingByChildResource(resource metav1.
 	return ms, servingGroupName, nil
 }
 
-// shouldSkipPodHandling checks if a pod should be skipped based on revision mssmatch
+// shouldSkipPodHandling checks if a pod should be skipped based on revision mismatch
 func (c *ModelServingController) shouldSkipPodHandling(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) bool {
 	podRevision := utils.PodRevision(pod)
 	servingGroup := c.store.GetServingGroup(types.NamespacedName{
@@ -1152,6 +1132,60 @@ func (c *ModelServingController) shouldSkipPodHandling(ms *workloadv1alpha1.Mode
 			pod.Namespace, pod.Name, podRevision, servingGroupName, servingGroup.Revision)
 		return true
 	}
+	return false
+}
+
+func getMetaObject(obj interface{}) metav1.Object {
+	if metaObj, ok := obj.(metav1.Object); ok {
+		return metaObj
+	}
+
+	// Handle tombstone object
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		if metaObj, ok := tombstone.Obj.(metav1.Object); ok {
+			return metaObj
+		}
+	}
+
+	return nil
+}
+
+func isOwnedByModelServing(metaObj metav1.Object) bool {
+	for _, ownerRef := range metaObj.GetOwnerReferences() {
+		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && ownerRef.Kind == "ModelServing" {
+			return true
+		}
+	}
+	return false
+}
+
+// handleDeletionInProgress checks and handles deletion states for ServingGroup or Role.
+// Returns true if the resource deletion is already in progress and the caller should stop further handling.
+func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) bool {
+	// check ServingGroup status
+	if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName) == datastore.ServingGroupDeleting {
+		// ServingGroup is already in the deletion process, only checking whether the deletion is completed
+		if c.isServingGroupDeleted(ms, servingGroupName) {
+			// ServingGroup has been deleted, so the storage needs to be updated and need to reconcile.
+			klog.V(2).Infof("servingGroup %s has been deleted", servingGroupName)
+			c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroupName)
+			c.enqueueModelServing(ms)
+		}
+		return true
+	}
+
+	// check role status
+	if c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID) == datastore.RoleDeleting {
+		// role is already in the deletion process, only checking whether the deletion is completed
+		if c.isRoleDeleted(ms, servingGroupName, roleName, roleID) {
+			// role has been deleted, so the storage needs to be updated and need to reconcile.
+			klog.V(2).Infof("role %s of servingGroup %s has been deleted", roleID, servingGroupName)
+			c.store.DeleteRole(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID)
+			c.enqueueModelServing(ms)
+		}
+		return true
+	}
+
 	return false
 }
 
@@ -1451,6 +1485,9 @@ func (c *ModelServingController) manageHeadlessService(ctx context.Context, ms *
 	}
 
 	for _, sg := range servingGroups {
+		if sg.Status == datastore.ServingGroupDeleting {
+			continue
+		}
 		for _, role := range ms.Spec.Template.Roles {
 			roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, role.Name)
 			if err != nil {
