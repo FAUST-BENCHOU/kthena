@@ -172,26 +172,26 @@ func TestModelServingServiceRecovery(t *testing.T) {
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
 	// Try to find a Service created for ModelServing (may or may not exist)
-svcList, err := kubeClient.
-	CoreV1().
-	Services(testNamespace).
-	List(ctx, metav1.ListOptions{})
-require.NoError(t, err, "Failed to list services")
+	svcList, err := kubeClient.
+		CoreV1().
+		Services(testNamespace).
+		List(ctx, metav1.ListOptions{})
+	require.NoError(t, err, "Failed to list services")
 
-var originalService *corev1.Service
-for i := range svcList.Items {
-	// Any service created by ModelServing / Role is acceptable
-	if svcList.Items[i].Spec.ClusterIP != "" {
-		originalService = &svcList.Items[i]
-		break
+	var originalService *corev1.Service
+	for i := range svcList.Items {
+		// Any service created by ModelServing / Role is acceptable
+		if svcList.Items[i].Spec.ClusterIP != "" {
+			originalService = &svcList.Items[i]
+			break
+		}
 	}
-}
 
-// If no Service exists, recovery is not applicable
-if originalService == nil {
-	t.Log("No Service created for ModelServing, skipping service recovery test")
-	return
-}
+	// If no Service exists, recovery is not applicable
+	if originalService == nil {
+		t.Log("No Service created for ModelServing, skipping service recovery test")
+		return
+	}
 
 	originalUID := originalService.UID
 
