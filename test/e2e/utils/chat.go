@@ -185,7 +185,7 @@ func min(a, b time.Duration) time.Duration {
 }
 
 // WaitForModelRouteReconciled waits for a ModelRoute to be reconciled and ready to serve requests.
-// Returns the number of tokens consumed during verification (for rate limit accounting).
+// Returns the number of tokens consumed during verification.
 func WaitForModelRouteReconciled(t *testing.T, modelName string, messages []ChatMessage, tokensPerRequest int) int {
 	maxAttempts := 20
 	backoff := 1 * time.Second
@@ -194,9 +194,10 @@ func WaitForModelRouteReconciled(t *testing.T, modelName string, messages []Chat
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		resp := SendChatRequestWithURL(t, DefaultRouterURL, modelName, messages)
 		resp.Body.Close()
+		// Count tokens for EVERY attempt that reaches the router
+		tokensConsumed += tokensPerRequest
 
 		if resp.StatusCode == http.StatusOK {
-			tokensConsumed += tokensPerRequest
 			t.Logf("ModelRoute '%s' reconciled and ready (attempt %d/%d, consumed %d tokens)",
 				modelName, attempt+1, maxAttempts, tokensConsumed)
 			return tokensConsumed

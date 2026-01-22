@@ -492,7 +492,10 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		// Wait for ModelRoute to be reconciled (returns tokens consumed)
+		// Wait for router to reconcile the ModelRoute (reduces verification attempts)
+		time.Sleep(5 * time.Second)
+
+		// Verify ModelRoute is ready and count tokens consumed
 		tokensConsumed := utils.WaitForModelRouteReconciled(t, createdModelRoute.Spec.ModelName, standardMessage, tokensPerRequest)
 
 		// Calculate remaining quota after reconciliation check
@@ -549,7 +552,10 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		// Wait for ModelRoute to be reconciled (returns tokens consumed)
+		// Wait for router to reconcile the ModelRoute (reduces verification attempts)
+		time.Sleep(5 * time.Second)
+
+		// Verify ModelRoute is ready and count tokens consumed
 		tokensConsumed := utils.WaitForModelRouteReconciled(t, createdModelRoute.Spec.ModelName, standardMessage, tokensPerRequest)
 
 		// Exhaust remaining quota to ensure rate limit is active
@@ -613,7 +619,10 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		// Wait for ModelRoute to be reconciled (returns tokens consumed)
+		// Wait for router to reconcile the ModelRoute (reduces verification attempts)
+		time.Sleep(5 * time.Second)
+
+		// Verify ModelRoute is ready and count tokens consumed
 		tokensConsumed := utils.WaitForModelRouteReconciled(t, createdModelRoute.Spec.ModelName, standardMessage, tokensPerRequest)
 
 		// Consume the remaining quota
