@@ -469,7 +469,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		utils.NewChatMessage("user", "hello world"),
 	}
 
-	// Test 1: Verify input token rate limit enforcement (30 tokens/minute)
+	// Test 1: Verify input token rate limit enforcement
 	t.Run("VerifyInputTokenRateLimitEnforcement", func(t *testing.T) {
 		t.Log("Test 1: Verifying input token rate limit")
 
@@ -492,14 +492,16 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		// Calculate expected successful requests
-		expectedSuccessfulRequests := inputTokenLimit / tokensPerRequest
-		if expectedSuccessfulRequests == 0 {
-			t.Fatalf("Invalid test configuration: inputTokenLimit (%d) / tokensPerRequest (%d) = 0",
-				inputTokenLimit, tokensPerRequest)
-		}
+		// First request: use CheckChatCompletions to handle router reconciliation
+		resp := utils.CheckChatCompletions(t, createdModelRoute.Spec.ModelName, standardMessage)
+		tokensConsumed := resp.Attempts * tokensPerRequest
+		t.Logf("Router reconciliation complete (consumed %d tokens in %d attempts)", tokensConsumed, resp.Attempts)
 
-		// Send requests until we exhaust the quota
+		// Calculate remaining quota
+		remainingQuota := inputTokenLimit - tokensConsumed
+		expectedSuccessfulRequests := remainingQuota / tokensPerRequest
+
+		// Send remaining requests until quota exhausted
 		for i := 0; i < expectedSuccessfulRequests; i++ {
 			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
 			responseBody, readErr := io.ReadAll(resp.Body)
@@ -507,24 +509,22 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 
 			require.NoError(t, readErr, "Failed to read response body on request %d", i+1)
 			require.Equal(t, http.StatusOK, resp.StatusCode,
-				"Request %d should succeed (consumed ~%d/%d tokens). Response: %s",
-				i+1, (i+1)*tokensPerRequest, inputTokenLimit, string(responseBody))
-			t.Logf("Request %d succeeded (consumed ~%d/%d tokens)", i+1, (i+1)*tokensPerRequest, inputTokenLimit)
+				"Request %d should succeed. Response: %s", i+1, string(responseBody))
+			t.Logf("Request %d succeeded", i+1)
 		}
 
-		// Next request should be rate limited (quota exhausted)
+		// Next request should be rate limited
 		rateLimitedResp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
-		defer rateLimitedResp.Body.Close()
+		responseBody, readErr := io.ReadAll(rateLimitedResp.Body)
+		rateLimitedResp.Body.Close()
 
+		require.NoError(t, readErr, "Failed to read rate limit response body")
 		assert.Equal(t, http.StatusTooManyRequests, rateLimitedResp.StatusCode,
-			"Request %d should be rate limited", expectedSuccessfulRequests+1)
-
-		errorBody, err := io.ReadAll(rateLimitedResp.Body)
-		require.NoError(t, err, "Failed to read rate limit error response body")
-		assert.Contains(t, strings.ToLower(string(errorBody)), "rate limit",
+			"Request should be rate limited after exhausting quota")
+		assert.Contains(t, strings.ToLower(string(responseBody)), "rate limit",
 			"Rate limit error response must contain descriptive message")
 
-		t.Logf("Input token rate limit enforced after %d requests", expectedSuccessfulRequests)
+		t.Logf("Input token rate limit enforced after %d total requests", resp.Attempts+expectedSuccessfulRequests)
 	})
 
 	// Test 2 Verify rate limit window accuracy and persistence
@@ -550,8 +550,13 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		// Exhaust quota to ensure rate limit is active
-		expectedSuccessfulRequests := inputTokenLimit / tokensPerRequest
+		// First request: handle reconciliation and track tokens
+		resp := utils.CheckChatCompletions(t, createdModelRoute.Spec.ModelName, standardMessage)
+		tokensConsumed := resp.Attempts * tokensPerRequest
+
+		// Exhaust remaining quota
+		remainingQuota := inputTokenLimit - tokensConsumed
+		expectedSuccessfulRequests := remainingQuota / tokensPerRequest
 		for i := 0; i < expectedSuccessfulRequests; i++ {
 			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
 			resp.Body.Close()
@@ -573,7 +578,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		assert.Equal(t, http.StatusTooManyRequests, midWindowResp.StatusCode,
 			"Rate limit should persist within the time window")
 
-		// Verify rate limit resets after window expiration (65 seconds > 60 seconds)
+		// Verify rate limit resets after window expiration
 		remainingWindowDuration := (rateLimitWindowSeconds * time.Second) - halfWindowDuration + windowResetBuffer
 		t.Logf("Waiting additional %v for window reset (total: %v)...",
 			remainingWindowDuration, halfWindowDuration+remainingWindowDuration)
@@ -610,8 +615,13 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		// Consume the quota
-		expectedSuccessfulRequests := inputTokenLimit / tokensPerRequest
+		// First request: handle reconciliation and track tokens
+		resp := utils.CheckChatCompletions(t, createdModelRoute.Spec.ModelName, standardMessage)
+		tokensConsumed := resp.Attempts * tokensPerRequest
+
+		// Consume remaining quota
+		remainingQuota := inputTokenLimit - tokensConsumed
+		expectedSuccessfulRequests := remainingQuota / tokensPerRequest
 		for i := 0; i < expectedSuccessfulRequests; i++ {
 			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
 			resp.Body.Close()
@@ -630,8 +640,9 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		t.Logf("Waiting %v for complete rate limit window reset...", windowResetDuration)
 		time.Sleep(windowResetDuration)
 
-		// Verify quota is restored after reset (should allow 2 requests again)
-		for i := 0; i < expectedSuccessfulRequests; i++ {
+		// After window reset, full quota is restored (30 tokens = 3 requests)
+		fullQuotaRequests := inputTokenLimit / tokensPerRequest
+		for i := 0; i < fullQuotaRequests; i++ {
 			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
 			resp.Body.Close()
 			assert.Equal(t, http.StatusOK, resp.StatusCode,
@@ -644,7 +655,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		assert.Equal(t, http.StatusTooManyRequests, postResetRateLimitedResp.StatusCode,
 			"Rate limit should be active again after consuming quota")
 
-		t.Logf("Rate limit reset mechanism verified (quota restored: %d requests)", expectedSuccessfulRequests)
+		t.Logf("Rate limit reset mechanism verified (quota restored: %d requests)", fullQuotaRequests)
 	})
 
 	// Test 4: Verify output token rate limit enforcement
