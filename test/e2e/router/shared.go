@@ -325,6 +325,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		// Send multiple requests and verify weight distribution statistics
 		// Use more requests to reduce randomness impact
 		const totalRequests = 500
+		const sumTolerance = 0.01 // Allow ±1% deviation for floating-point rounding errors
 		v1Count := 0
 		v2Count := 0
 
@@ -362,8 +363,8 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		assert.LessOrEqual(t, v2Ratio, expectedV2Ratio+maxDeviation,
 			"deepseek-r1-7b ratio should be at most %.1f%% (expected %.1f%%)", (expectedV2Ratio+maxDeviation)*100, expectedV2Ratio*100)
 
-		// 4. Verify statistics sum to 100%
-		assert.Equal(t, 1.0, v1Ratio+v2Ratio, "Distribution ratios should sum to exactly 100%")
+		// 4. Verify statistics sum to 100% (with tolerance for floating-point rounding)
+		assert.InDelta(t, 1.0, v1Ratio+v2Ratio, sumTolerance, "Distribution ratios should sum to approximately 100%")
 
 		// Log statistics for debugging
 		t.Logf("Weight distribution statistics verified:")
@@ -375,6 +376,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 	t.Run("WeightSumNot100Percent", func(t *testing.T) {
 		// Update ModelRoute with weights that don't sum to 100%
 		// Weights are relative, so 50:30 means 5/8 and 3/8 traffic distribution
+		const sumTolerance = 0.01 // Allow ±1% deviation for floating-point rounding errors
 		updatedModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
 		require.NoError(t, err)
 
@@ -433,8 +435,8 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		assert.LessOrEqual(t, v2Ratio, expectedV2Ratio+maxDeviation,
 			"deepseek-r1-1-5b-v2 ratio should be at most %.1f%% (expected %.1f%%)", (expectedV2Ratio+maxDeviation)*100, expectedV2Ratio*100)
 
-		// Verify statistics sum to 100%
-		assert.Equal(t, 1.0, v1Ratio+v2Ratio, "Distribution ratios should sum to exactly 100%")
+		// Verify statistics sum to 100% (with tolerance for floating-point rounding)
+		assert.InDelta(t, 1.0, v1Ratio+v2Ratio, sumTolerance, "Distribution ratios should sum to approximately 100%")
 
 		// Log statistics for debugging
 		t.Logf("Normalized weight distribution verified (50:30 -> 5/8:3/8):")

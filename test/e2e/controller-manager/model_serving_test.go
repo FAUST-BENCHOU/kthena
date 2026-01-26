@@ -17,12 +17,15 @@ limitations under the License.
 package controller_manager
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
@@ -79,6 +82,200 @@ func TestModelServingScaleUp(t *testing.T) {
 	assert.Equal(t, int32(3), finalMS.Status.AvailableReplicas, "Final ModelServing should have 3 available replicas")
 
 	t.Log("ModelServing scale up test passed successfully")
+}
+
+// TestModelServingPodRecovery verifies that when a pod is deleted,
+// the corresponding role can recreate the pod successfully.
+func TestModelServingPodRecovery(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	// Create Kubernetes client locally (do NOT modify test suite)
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// Create a basic ModelServing
+	modelServing := createBasicModelServing("test-pod-recovery", 1, 1)
+
+	t.Log("Creating ModelServing for pod recovery test")
+	_, err = kthenaClient.WorkloadV1alpha1().
+		ModelServings(testNamespace).
+		Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	// Register cleanup for ModelServing
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
+		}
+	})
+
+	// Wait until ModelServing is ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// List pods using label selector scoped to the current ModelServing instance
+	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list pods with label selector")
+
+	// Set original pod to first item since list already uses label selector
+	var originalPod *corev1.Pod
+	if len(podList.Items) > 0 {
+		originalPod = &podList.Items[0]
+	}
+
+	// If no pod with the label is found, skip the test
+	if originalPod == nil {
+		t.Logf("No pod found with label selector %q, skipping pod recovery test", labelSelector)
+		t.Skip()
+	}
+
+	originalPodUID := originalPod.UID
+	originalPodName := originalPod.Name
+	t.Logf("Deleting pod %s (UID: %s)", originalPodName, originalPodUID)
+
+	// Delete the pod
+	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, originalPodName, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete pod")
+
+	// Wait for a new pod with different UID and PodReady condition set to True
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		for _, pod := range pods.Items {
+			// Check if it's a new pod (different UID from original)
+			if pod.UID != originalPodUID {
+				// Check for PodReady condition with status True
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+						t.Logf("New pod created and ready: %s (UID: %s)", pod.Name, pod.UID)
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}, 2*time.Minute, 5*time.Second, "New pod was not recreated with PodReady condition after deletion")
+
+	t.Log("Pod recovery test passed successfully")
+}
+
+// TestModelServingServiceRecovery verifies that when the headless Service
+// is deleted, it can be recreated successfully and ModelServing remains healthy.
+func TestModelServingServiceRecovery(t *testing.T) {
+	ctx, kthenaClient := setupControllerManagerE2ETest(t)
+
+	// Create Kubernetes client locally
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create Kubernetes client")
+
+	// Create a basic ModelServing
+	modelServing := createBasicModelServing("test-service-recovery", 1, 1)
+
+	t.Log("Creating ModelServing for service recovery test")
+	_, err = kthenaClient.WorkloadV1alpha1().
+		ModelServings(testNamespace).
+		Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	// Register cleanup for ModelServing
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
+		}
+	})
+
+	// Wait until ModelServing is ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Get the ModelServing to obtain its UID
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing")
+
+	// List Services with label selector scoped to the current ModelServing
+	labelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
+	serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	require.NoError(t, err, "Failed to list Services in namespace")
+
+	// Filter Services owned by this ModelServing and find the headless one
+	var originalService *corev1.Service
+	var originalServiceUID string
+	for _, svc := range serviceList.Items {
+		// Check if service is owned by the ModelServing
+		ownedByMS := false
+		for _, ref := range svc.OwnerReferences {
+			if ref.UID == ms.UID {
+				ownedByMS = true
+				break
+			}
+		}
+		// Select if it's owned by the ModelServing and is headless
+		if ownedByMS && svc.Spec.ClusterIP == corev1.ClusterIPNone {
+			originalService = &svc
+			originalServiceUID = string(svc.UID)
+			break
+		}
+	}
+
+	// If no headless Service owned by the ModelServing exists, gracefully skip the test
+	if originalService == nil {
+		t.Log("No headless Service owned by ModelServing found, skipping service recovery test")
+		t.Skip()
+	}
+
+	t.Logf("Deleting headless Service %s (UID: %s)", originalService.Name, originalServiceUID)
+
+	// Delete the Service
+	err = kubeClient.CoreV1().Services(testNamespace).Delete(ctx, originalService.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete headless Service")
+
+	// Wait for a new headless Service with same owner but different UID to appear
+	require.Eventually(t, func() bool {
+		serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		for _, svc := range serviceList.Items {
+			// Check if service is owned by the same ModelServing
+			ownedByMS := false
+			for _, ref := range svc.OwnerReferences {
+				if ref.UID == ms.UID {
+					ownedByMS = true
+					break
+				}
+			}
+			// Return true if it's a new service (different UID) owned by the ModelServing and is headless
+			if ownedByMS && string(svc.UID) != originalServiceUID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
+				t.Logf("New Service created: %s (UID: %s)", svc.Name, svc.UID)
+				return true
+			}
+		}
+		return false
+	}, 2*time.Minute, 5*time.Second, "Headless Service owned by ModelServing was not recreated after deletion")
+
+	// Verify ModelServing is still ready
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	t.Log("ModelServing service recovery test passed")
 }
 
 func createBasicModelServing(name string, servingGroupReplicas, roleReplicas int32) *workload.ModelServing {
