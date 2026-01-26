@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -480,9 +481,37 @@ func (c *ModelServingController) syncAll() {
 	if err != nil {
 		klog.Errorf("failed to list pods: %v", err)
 	}
+
+	// Collect entry pods for role recovery while processing all pods
+	entryPodsForRecovery := make(map[string]map[string]map[string]*corev1.Pod) // key: namespace/name, value: servingGroup -> roleID -> entryPod
 	for _, pod := range pods {
 		c.addPod(pod)
+
+		// Collect entry pods for role recovery
+		if pod.DeletionTimestamp == nil && pod.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry {
+			ms, servingGroupName, err := c.getModelServingByChildResource(pod)
+			if err == nil {
+				roleID := utils.GetRoleID(pod)
+				roleName := utils.GetRoleName(pod)
+				if servingGroupName != "" && roleName != "" && roleID != "" {
+					key := fmt.Sprintf("%s/%s", ms.Namespace, ms.Name)
+					if entryPodsForRecovery[key] == nil {
+						entryPodsForRecovery[key] = make(map[string]map[string]*corev1.Pod)
+					}
+					if entryPodsForRecovery[key][servingGroupName] == nil {
+						entryPodsForRecovery[key][servingGroupName] = make(map[string]*corev1.Pod)
+					}
+					// Use the first entry pod found for each roleID
+					if entryPodsForRecovery[key][servingGroupName][roleID] == nil {
+						entryPodsForRecovery[key][servingGroupName][roleID] = pod
+					}
+				}
+			}
+		}
 	}
+
+	// Recover role state from collected entry pods
+	c.recoverRolesFromEntryPods(entryPodsForRecovery)
 
 	modelServings, err := c.modelServingLister.List(labels.Everything())
 	if err != nil {
@@ -1145,6 +1174,52 @@ func (c *ModelServingController) getModelServingByChildResource(resource metav1.
 		return nil, "", err
 	}
 	return ms, servingGroupName, nil
+}
+
+// recoverRolesFromEntryPods recovers role state from collected entry pods after controller restart.
+// This ensures that roles are restored to the store even if the controller restarted
+// during pod creation, leaving some pods in Pending state.
+func (c *ModelServingController) recoverRolesFromEntryPods(entryPodsMap map[string]map[string]map[string]*corev1.Pod) {
+	// Recover roles to store
+	for key, servingGroups := range entryPodsMap {
+		parts := strings.Split(key, "/")
+		if len(parts) != 2 {
+			continue
+		}
+		ns, name := parts[0], parts[1]
+
+		// Verify ModelServing still exists
+		_, err := c.modelServingLister.ModelServings(ns).Get(name)
+		if err != nil {
+			continue
+		}
+
+		for servingGroupName, roles := range servingGroups {
+			for roleID, entryPod := range roles {
+				roleName := utils.GetRoleName(entryPod)
+				if roleName == "" {
+					continue
+				}
+
+				// Check if role already exists in store
+				roleList, _ := c.store.GetRoleList(types.NamespacedName{Namespace: ns, Name: name}, servingGroupName, roleName)
+				found := false
+				for _, r := range roleList {
+					if r.Name == roleID {
+						found = true
+						break
+					}
+				}
+
+				// If role not in store, recover it from the entry pod
+				if !found {
+					revision := utils.PodRevision(entryPod)
+					c.store.AddRole(types.NamespacedName{Namespace: ns, Name: name}, servingGroupName, roleName, roleID, revision)
+					klog.V(2).Infof("Recovered role %s/%s from existing pods (revision: %s)", servingGroupName, roleID, revision)
+				}
+			}
+		}
+	}
 }
 
 // shouldSkipPodHandling checks if a pod should be skipped based on revision mismatch

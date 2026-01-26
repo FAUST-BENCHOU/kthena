@@ -4196,3 +4196,150 @@ func TestManageHeadlessService(t *testing.T) {
 		})
 	}
 }
+
+// TestRecoverRolesFromPods tests that roles are correctly recovered from existing pods
+// after controller restart during pod creation.
+func TestRecoverRolesFromPods(t *testing.T) {
+	// Setup fake clients
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+
+	// Create controller
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	assert.NoError(t, err)
+
+	// Create a ModelServing with 1 ServingGroup and 1 role replica
+	ms := createStandardModelServing("test-recover", 1, 1)
+	ms.Spec.Template.Roles[0].WorkerReplicas = 3 // 3 worker pods per role
+	// Add WorkerTemplate (required for worker pod creation)
+	ms.Spec.Template.Roles[0].WorkerTemplate = &workloadv1alpha1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "worker-container",
+					Image: "test-image:latest",
+				},
+			},
+		},
+	}
+
+	// Add ModelServing to fake client
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(
+		context.Background(), ms, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Start informers
+	stop := make(chan struct{})
+	defer close(stop)
+	go controller.modelServingsInformer.Run(stop)
+	go controller.podsInformer.Run(stop)
+
+	// Wait for cache sync
+	cache.WaitForCacheSync(stop,
+		controller.modelServingsInformer.HasSynced,
+		controller.podsInformer.HasSynced,
+	)
+
+	// Simulate scenario: Controller was creating pods but restarted
+	// Some pods were created but role was not added to store
+	servingGroupName := utils.GenerateServingGroupName(ms.Name, 0)
+	roleID := utils.GenerateRoleID("prefill", 0)
+	revision := "revision-123"
+
+	// Create entry pod (already exists in cluster)
+	entryPod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, servingGroupName, 0, revision)
+	entryPod.Status.Phase = corev1.PodPending // Pod is still pending
+	_, err = kubeClient.CoreV1().Pods("default").Create(context.Background(), entryPod, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Create only 2 out of 3 worker pods (simulating controller restart during creation)
+	// Worker pod 1 - Running
+	workerPod1 := utils.GenerateWorkerPod(ms.Spec.Template.Roles[0], ms, entryPod, servingGroupName, 0, 1, revision)
+	workerPod1.Status.Phase = corev1.PodRunning
+	workerPod1.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:   corev1.PodReady,
+			Status: corev1.ConditionTrue,
+		},
+	}
+	_, err = kubeClient.CoreV1().Pods("default").Create(context.Background(), workerPod1, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Worker pod 2 - Pending
+	workerPod2 := utils.GenerateWorkerPod(ms.Spec.Template.Roles[0], ms, entryPod, servingGroupName, 0, 2, revision)
+	workerPod2.Status.Phase = corev1.PodPending
+	_, err = kubeClient.CoreV1().Pods("default").Create(context.Background(), workerPod2, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Worker pod 3 - Not created yet (missing)
+
+	// Wait for pods to be synced to cache
+	time.Sleep(100 * time.Millisecond)
+
+	// Simulate controller restart: clear the store (in real scenario, store is in-memory and lost on restart)
+	// Create a new store to simulate restart
+	controller.store = datastore.New()
+
+	// Verify store is empty (simulating controller restart - store was cleared)
+	roleList, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), servingGroupName, "prefill")
+	// GetRoleList returns ErrServingGroupNotFound if ServingGroup doesn't exist
+	assert.Error(t, err, "Should error because ServingGroup doesn't exist in store after restart")
+	assert.Equal(t, 0, len(roleList), "Store should be empty after restart")
+
+	// Collect entry pods for role recovery (simulating what syncAll does)
+	entryPodsForRecovery := make(map[string]map[string]map[string]*corev1.Pod)
+	allPods, _ := controller.podsLister.List(labels.Everything())
+	for _, pod := range allPods {
+		if pod.DeletionTimestamp == nil && pod.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry {
+			podMS, podServingGroupName, err := controller.getModelServingByChildResource(pod)
+			if err == nil {
+				podRoleID := utils.GetRoleID(pod)
+				podRoleName := utils.GetRoleName(pod)
+				if podServingGroupName != "" && podRoleName != "" && podRoleID != "" {
+					key := fmt.Sprintf("%s/%s", podMS.Namespace, podMS.Name)
+					if entryPodsForRecovery[key] == nil {
+						entryPodsForRecovery[key] = make(map[string]map[string]*corev1.Pod)
+					}
+					if entryPodsForRecovery[key][podServingGroupName] == nil {
+						entryPodsForRecovery[key][podServingGroupName] = make(map[string]*corev1.Pod)
+					}
+					if entryPodsForRecovery[key][podServingGroupName][podRoleID] == nil {
+						entryPodsForRecovery[key][podServingGroupName][podRoleID] = pod
+					}
+				}
+			}
+		}
+	}
+
+	// Call recoverRolesFromEntryPods to recover role state
+	controller.recoverRolesFromEntryPods(entryPodsForRecovery)
+
+	// Verify role was recovered to store
+	roleList, err = controller.store.GetRoleList(utils.GetNamespaceName(ms), servingGroupName, "prefill")
+	assert.NoError(t, err, "Role should be recovered to store")
+	assert.Equal(t, 1, len(roleList), "Should have 1 role recovered")
+	assert.Equal(t, roleID, roleList[0].Name, "Role ID should match")
+	assert.Equal(t, revision, roleList[0].Revision, "Revision should match")
+
+	// Add ServingGroup to store (needed for manageRole to work)
+	// In real scenario, this would also be recovered, but for this test we add it manually
+	controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, revision)
+
+	// Verify that manageRoleReplicas can now work correctly
+	// It should detect that worker pod 3 is missing and create it
+	newRevision := utils.Revision(ms.Spec.Template.Roles)
+	err = controller.manageRole(context.Background(), ms, newRevision)
+	assert.NoError(t, err)
+
+	// Wait a bit for pod creation
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify that the missing worker pod 3 was created
+	// Generate the expected worker pod name using the same logic as GenerateWorkerPod
+	workerPod3Expected := utils.GenerateWorkerPod(ms.Spec.Template.Roles[0], ms, entryPod, servingGroupName, 0, 3, newRevision)
+	workerPod3, err := kubeClient.CoreV1().Pods("default").Get(context.Background(), workerPod3Expected.Name, metav1.GetOptions{})
+	assert.NoError(t, err, "Missing worker pod 3 should be created")
+	assert.NotNil(t, workerPod3, "Worker pod 3 should exist")
+}
