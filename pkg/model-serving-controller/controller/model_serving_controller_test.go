@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
@@ -1891,6 +1892,154 @@ func TestScaleUpRoles(t *testing.T) {
 				// Verify total roles count
 				expectedTotal := len(tt.existingIndices) + len(tt.expectedNewIndices)
 				assert.Equal(t, expectedTotal, len(roles), "Total role count should match expected")
+			}
+		})
+	}
+}
+
+func TestManageRoleReplicas(t *testing.T) {
+	tests := []struct {
+		name             string
+		roleReplicas     int32
+		workerReplicas   int32
+		initialRoleIDs   []int
+		addEntryPod      bool
+		mismatchOwnerUID bool
+		expectedRoleSize int
+		expectedPodCount int
+		expectRequeue    bool
+	}{
+		{
+			name:             "recreate missing pods when role count matches",
+			roleReplicas:     1,
+			workerReplicas:   1,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      true,
+			expectedRoleSize: 1,
+			expectedPodCount: 2,
+			expectRequeue:    false,
+		},
+		{
+			name:             "scale up when role replicas are less than expected",
+			roleReplicas:     2,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      false,
+			expectedRoleSize: 2,
+			expectedPodCount: 2,
+			expectRequeue:    false,
+		},
+		{
+			name:             "scale down when role replicas are more than expected",
+			roleReplicas:     1,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0, 1},
+			addEntryPod:      false,
+			expectedRoleSize: 1,
+			expectedPodCount: 2,
+			expectRequeue:    false,
+		},
+		{
+			name:             "reenqueue when pod owner UID mismatches",
+			roleReplicas:     1,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      true,
+			mismatchOwnerUID: true,
+			expectedRoleSize: 1,
+			expectedPodCount: 1,
+			expectRequeue:    true,
+		},
+	}
+
+	for idx, tt := range tests {
+		// set klog verbsity to error to reduce test output noise
+
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+			assert.NoError(t, err)
+
+			roleName := "default"
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      fmt.Sprintf("test-manage-role-%d", idx),
+					UID:       types.UID(fmt.Sprintf("ms-uid-%d", idx)),
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:           roleName,
+								Replicas:       ptr.To[int32](tt.roleReplicas),
+								WorkerReplicas: tt.workerReplicas,
+								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{{
+											Name:  "entry-container",
+											Image: "test-image:latest",
+										}},
+									},
+								},
+								WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{{
+											Name:  "worker-container",
+											Image: "test-image:latest",
+										}},
+									},
+								},
+							},
+						},
+					},
+					RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+				},
+			}
+
+			groupName := utils.GenerateServingGroupName(ms.Name, 0)
+			revision := "rev-1"
+			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, revision)
+			for _, roleID := range tt.initialRoleIDs {
+				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, roleID), revision)
+			}
+
+			if tt.addEntryPod {
+				entryPod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, groupName, 0, revision)
+				if tt.mismatchOwnerUID && len(entryPod.OwnerReferences) > 0 {
+					entryPod.OwnerReferences[0].UID = types.UID("mismatched-uid")
+				}
+				_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
+				assert.NoError(t, err)
+				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
+			}
+
+			controller.manageRoleReplicas(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+
+			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
+			assert.NoError(t, err)
+			assert.Len(t, roles, tt.expectedRoleSize, "role list should match expected count")
+
+			//if tt.expectedPodCount > 0 {
+			selector := labels.SelectorFromSet(map[string]string{
+				workloadv1alpha1.GroupNameLabelKey: groupName,
+				workloadv1alpha1.RoleLabelKey:      roleName,
+			})
+			pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: selector.String()})
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedPodCount, len(pods.Items), "pod count should match expected")
+			//}
+
+			if tt.expectRequeue {
+				requeued := waitForObjectInCache(t, 2*time.Second, func() bool {
+					return controller.workqueue.Len() > 0
+				})
+				assert.True(t, requeued, "model serving should be requeued for owner UID mismatch")
 			}
 		})
 	}
