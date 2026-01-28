@@ -179,7 +179,7 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	mux := http.NewServeMux()
 
 	modelServingValidator := modelservingwebhook.NewModelServingValidator()
-	mux.HandleFunc("/validate-workload-ai-v1alpha1-modelServing", modelServingValidator.Handle)
+	mux.HandleFunc("/validate-workload-ai-v1alpha1-modelserving", modelServingValidator.Handle)
 
 	modelValidator := modelboosterwebhook.NewModelValidator()
 	modelMutator := modelboosterwebhook.NewModelMutator()
