@@ -491,7 +491,7 @@ func TestValidateGangPolicy(t *testing.T) {
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
 								MinRoleReplicas: map[string]int32{
-									"worker": 3, // 2*1 (entry) + 3 (workers) = 5 total, min=3 is valid
+									"worker": 2, // 2 (role replicas) >= 2 (min), valid
 								},
 							},
 						},
@@ -532,7 +532,7 @@ func TestValidateGangPolicy(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid minRoleReplicas - exceeds total replicas",
+			name: "invalid minRoleReplicas - exceeds role replicas",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -547,7 +547,7 @@ func TestValidateGangPolicy(t *testing.T) {
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
 								MinRoleReplicas: map[string]int32{
-									"worker": 10, // 2*1 (entry) + 3 (workers) = 5 total, min=10 is invalid
+									"worker": 10, // exceeds replicas 2
 								},
 							},
 						},
@@ -558,7 +558,7 @@ func TestValidateGangPolicy(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("template").Child("gangPolicy").Child("minRoleReplicas").Key("worker"),
 					int32(10),
-					"minRoleReplicas (10) for role worker cannot exceed total replicas (5)",
+					"minRoleReplicas (10) for role worker cannot exceed replicas (2)",
 				),
 			},
 		},

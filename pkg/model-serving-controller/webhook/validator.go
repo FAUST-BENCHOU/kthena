@@ -237,19 +237,19 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 		// Find the role to check its actual replicas
 		for _, role := range ms.Spec.Template.Roles {
 			if role.Name == roleName {
-				// Calculate total replicas for this role (entry + workers)
-				totalReplicas := int32(1) // Entry pod
+				/// Calculate total replicas for this role
+				// minRoleReplicas is compared against the number of Role replicas
+				replicas := int32(1)
 				if role.Replicas != nil {
-					totalReplicas *= *role.Replicas
+					replicas = *role.Replicas
 				}
-				totalReplicas += role.WorkerReplicas
 
 				// Validate minReplicas doesn't exceed total replicas
-				if minReplicas > totalReplicas {
+				if minReplicas > replicas {
 					allErrs = append(allErrs, field.Invalid(
 						minRoleReplicasPath.Key(roleName),
 						minReplicas,
-						fmt.Sprintf("minRoleReplicas (%d) for role %s cannot exceed total replicas (%d)", minReplicas, roleName, totalReplicas),
+						fmt.Sprintf("minRoleReplicas (%d) for role %s cannot exceed replicas (%d)", minReplicas, roleName, replicas),
 					))
 				}
 
