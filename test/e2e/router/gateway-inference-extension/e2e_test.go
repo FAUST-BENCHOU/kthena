@@ -39,6 +39,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	timer := framework.NewTestTimer("gateway-inference-extension")
+	framework.SetGlobalTimer(timer)
+	
 	testNamespace = "kthena-e2e-gie-" + utils.RandomString(5)
 
 	config := framework.NewDefaultConfig()
@@ -47,33 +50,41 @@ func TestMain(m *testing.M) {
 	config.GatewayAPIEnabled = true
 	config.InferenceExtensionEnabled = true
 
+	timer.StartSetup("InstallKthena")
 	if err := framework.InstallKthena(config); err != nil {
 		fmt.Printf("Failed to install kthena: %v\n", err)
 		os.Exit(1)
 	}
+	timer.EndSetup("InstallKthena")
 
 	var err error
+	timer.StartSetup("CreateRouterTestContext")
 	testCtx, err = routercontext.NewRouterTestContext(testNamespace)
 	if err != nil {
 		fmt.Printf("Failed to create router test context: %v\n", err)
 		_ = framework.UninstallKthena(config.Namespace)
 		os.Exit(1)
 	}
+	timer.EndSetup("CreateRouterTestContext")
 
+	timer.StartSetup("CreateTestNamespace")
 	if err := testCtx.CreateTestNamespace(); err != nil {
 		fmt.Printf("Failed to create test namespace: %v\n", err)
 		_ = framework.UninstallKthena(config.Namespace)
 		os.Exit(1)
 	}
+	timer.EndSetup("CreateTestNamespace")
 
+	timer.StartSetup("SetupCommonComponents")
 	if err := testCtx.SetupCommonComponents(); err != nil {
 		fmt.Printf("Failed to setup common components: %v\n", err)
 		_ = testCtx.DeleteTestNamespace()
 		_ = framework.UninstallKthena(config.Namespace)
 		os.Exit(1)
 	}
+	timer.EndSetup("SetupCommonComponents")
 
-	code := m.Run()
+	code := timer.RunTests(m)
 
 	if err := testCtx.CleanupCommonComponents(); err != nil {
 		fmt.Printf("Failed to cleanup common components: %v\n", err)
@@ -91,157 +102,161 @@ func TestMain(m *testing.M) {
 }
 
 func TestGatewayInferenceExtension(t *testing.T) {
-	ctx := context.Background()
+	framework.TrackTest(t, func(t *testing.T) {
+		ctx := context.Background()
 
-	// 1. Deploy InferencePool
-	t.Log("Deploying InferencePool...")
-	inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool]("examples/kthena-router/InferencePool.yaml")
-	inferencePool.Namespace = testNamespace
+		// 1. Deploy InferencePool
+		t.Log("Deploying InferencePool...")
+		inferencePool := utils.LoadYAMLFromFile[inferencev1.InferencePool]("examples/kthena-router/InferencePool.yaml")
+		inferencePool.Namespace = testNamespace
 
-	createdInferencePool, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create InferencePool")
+		createdInferencePool, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create InferencePool")
 
-	t.Cleanup(func() {
-		if err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Delete(context.Background(), createdInferencePool.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete InferencePool %s/%s: %v", testNamespace, createdInferencePool.Name, err)
+		t.Cleanup(func() {
+			if err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Delete(context.Background(), createdInferencePool.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete InferencePool %s/%s: %v", testNamespace, createdInferencePool.Name, err)
+			}
+		})
+
+		// 2. Deploy HTTPRoute
+		t.Log("Deploying HTTPRoute...")
+		httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("examples/kthena-router/HTTPRoute.yaml")
+		httpRoute.Namespace = testNamespace
+
+		// Update parentRefs to point to the kthena installation namespace
+		ktNamespace := gatewayv1.Namespace(kthenaNamespace)
+		if len(httpRoute.Spec.ParentRefs) > 0 {
+			for i := range httpRoute.Spec.ParentRefs {
+				httpRoute.Spec.ParentRefs[i].Namespace = &ktNamespace
+			}
 		}
+
+		createdHTTPRoute, err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Create(ctx, httpRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create HTTPRoute")
+
+		t.Cleanup(func() {
+			if err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Delete(context.Background(), createdHTTPRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete HTTPRoute %s/%s: %v", testNamespace, createdHTTPRoute.Name, err)
+			}
+		})
+
+		// 3. Test accessing the route
+		t.Log("Testing chat completions via HTTPRoute and InferencePool...")
+		messages := []utils.ChatMessage{
+			utils.NewChatMessage("user", "Hello GIE"),
+		}
+
+		utils.CheckChatCompletions(t, "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", messages)
 	})
-
-	// 2. Deploy HTTPRoute
-	t.Log("Deploying HTTPRoute...")
-	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("examples/kthena-router/HTTPRoute.yaml")
-	httpRoute.Namespace = testNamespace
-
-	// Update parentRefs to point to the kthena installation namespace
-	ktNamespace := gatewayv1.Namespace(kthenaNamespace)
-	if len(httpRoute.Spec.ParentRefs) > 0 {
-		for i := range httpRoute.Spec.ParentRefs {
-			httpRoute.Spec.ParentRefs[i].Namespace = &ktNamespace
-		}
-	}
-
-	createdHTTPRoute, err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Create(ctx, httpRoute, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create HTTPRoute")
-
-	t.Cleanup(func() {
-		if err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Delete(context.Background(), createdHTTPRoute.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete HTTPRoute %s/%s: %v", testNamespace, createdHTTPRoute.Name, err)
-		}
-	})
-
-	// 3. Test accessing the route
-	t.Log("Testing chat completions via HTTPRoute and InferencePool...")
-	messages := []utils.ChatMessage{
-		utils.NewChatMessage("user", "Hello GIE"),
-	}
-
-	utils.CheckChatCompletions(t, "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", messages)
 }
 
 // TestBothAPIsConfigured tests both ModelRoute/ModelServer and HTTPRoute/InferencePool APIs configured together.
 // It verifies that deepseek-r1-1-5b can be accessed via ModelRoute and deepseek-r1-7b can be accessed via HTTPRoute.
 func TestBothAPIsConfigured(t *testing.T) {
-	ctx := context.Background()
+	framework.TrackTest(t, func(t *testing.T) {
+		ctx := context.Background()
 
-	// 1. Deploy ModelRoute and ModelServer for ModelRoute/ModelServer API
-	t.Log("Deploying ModelRoute...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRoute-binding-gateway.yaml")
-	modelRoute.Namespace = testNamespace
+		// 1. Deploy ModelRoute and ModelServer for ModelRoute/ModelServer API
+		t.Log("Deploying ModelRoute...")
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRoute-binding-gateway.yaml")
+		modelRoute.Namespace = testNamespace
 
-	// Update parentRefs to point to the kthena installation namespace
-	ktNamespace := gatewayv1.Namespace(kthenaNamespace)
-	if len(modelRoute.Spec.ParentRefs) > 0 {
-		for i := range modelRoute.Spec.ParentRefs {
-			modelRoute.Spec.ParentRefs[i].Namespace = &ktNamespace
+		// Update parentRefs to point to the kthena installation namespace
+		ktNamespace := gatewayv1.Namespace(kthenaNamespace)
+		if len(modelRoute.Spec.ParentRefs) > 0 {
+			for i := range modelRoute.Spec.ParentRefs {
+				modelRoute.Spec.ParentRefs[i].Namespace = &ktNamespace
+			}
 		}
-	}
 
-	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create ModelRoute")
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
 
-	t.Cleanup(func() {
-		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", testNamespace, createdModelRoute.Name, err)
-		}
-	})
+		t.Cleanup(func() {
+			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", testNamespace, createdModelRoute.Name, err)
+			}
+		})
 
-	// ModelServer-ds1.5b.yaml is already deployed by SetupCommonComponents
+		// ModelServer-ds1.5b.yaml is already deployed by SetupCommonComponents
 
-	// 2. Deploy InferencePool for HTTPRoute/InferencePool API (pointing to deepseek-r1-7b)
-	t.Log("Deploying InferencePool for deepseek-r1-7b...")
-	inferencePool7b := &inferencev1.InferencePool{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "deepseek-r1-7b",
-			Namespace: testNamespace,
-		},
-		Spec: inferencev1.InferencePoolSpec{
-			TargetPorts: []inferencev1.Port{
-				{Number: 8000},
+		// 2. Deploy InferencePool for HTTPRoute/InferencePool API (pointing to deepseek-r1-7b)
+		t.Log("Deploying InferencePool for deepseek-r1-7b...")
+		inferencePool7b := &inferencev1.InferencePool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "deepseek-r1-7b",
+				Namespace: testNamespace,
 			},
-			Selector: inferencev1.LabelSelector{
-				MatchLabels: map[inferencev1.LabelKey]inferencev1.LabelValue{
-					inferencev1.LabelKey("app"): inferencev1.LabelValue("deepseek-r1-7b"),
+			Spec: inferencev1.InferencePoolSpec{
+				TargetPorts: []inferencev1.Port{
+					{Number: 8000},
+				},
+				Selector: inferencev1.LabelSelector{
+					MatchLabels: map[inferencev1.LabelKey]inferencev1.LabelValue{
+						inferencev1.LabelKey("app"): inferencev1.LabelValue("deepseek-r1-7b"),
+					},
+				},
+				EndpointPickerRef: inferencev1.EndpointPickerRef{
+					Name: "deepseek-r1-7b",
+					Port: &inferencev1.Port{
+						Number: 8080,
+					},
 				},
 			},
-			EndpointPickerRef: inferencev1.EndpointPickerRef{
-				Name: "deepseek-r1-7b",
-				Port: &inferencev1.Port{
-					Number: 8080,
-				},
-			},
-		},
-	}
-
-	createdInferencePool7b, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool7b, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create InferencePool for 7b")
-
-	t.Cleanup(func() {
-		if err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Delete(context.Background(), createdInferencePool7b.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete InferencePool %s/%s: %v", testNamespace, createdInferencePool7b.Name, err)
 		}
+
+		createdInferencePool7b, err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Create(ctx, inferencePool7b, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create InferencePool for 7b")
+
+		t.Cleanup(func() {
+			if err := testCtx.InferenceClient.InferenceV1().InferencePools(testNamespace).Delete(context.Background(), createdInferencePool7b.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete InferencePool %s/%s: %v", testNamespace, createdInferencePool7b.Name, err)
+			}
+		})
+
+		// 3. Deploy HTTPRoute pointing to the 7b InferencePool
+		t.Log("Deploying HTTPRoute...")
+		httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("examples/kthena-router/HTTPRoute.yaml")
+		httpRoute.Namespace = testNamespace
+		httpRoute.Name = "llm-route-7b"
+
+		// Update parentRefs to point to the kthena installation namespace (reuse ktNamespace from above)
+		ktNamespace = gatewayv1.Namespace(kthenaNamespace)
+		if len(httpRoute.Spec.ParentRefs) > 0 {
+			for i := range httpRoute.Spec.ParentRefs {
+				httpRoute.Spec.ParentRefs[i].Namespace = &ktNamespace
+			}
+		}
+
+		// Update backendRefs to point to the 7b InferencePool
+		if len(httpRoute.Spec.Rules) > 0 && len(httpRoute.Spec.Rules[0].BackendRefs) > 0 {
+			backendRefName := gatewayv1.ObjectName("deepseek-r1-7b")
+			httpRoute.Spec.Rules[0].BackendRefs[0].Name = backendRefName
+		}
+
+		createdHTTPRoute, err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Create(ctx, httpRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create HTTPRoute")
+
+		t.Cleanup(func() {
+			if err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Delete(context.Background(), createdHTTPRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete HTTPRoute %s/%s: %v", testNamespace, createdHTTPRoute.Name, err)
+			}
+		})
+
+		// 4. Test accessing both models
+		// Test ModelRoute/ModelServer API - deepseek-r1-1-5b via ModelRoute
+		t.Log("Testing ModelRoute/ModelServer API - accessing deepseek-r1-1-5b via ModelRoute...")
+		messages1_5b := []utils.ChatMessage{
+			utils.NewChatMessage("user", "Hello ModelRoute"),
+		}
+		utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages1_5b)
+
+		// Test HTTPRoute/InferencePool API - deepseek-r1-7b via HTTPRoute
+		t.Log("Testing HTTPRoute/InferencePool API - accessing deepseek-r1-7b via HTTPRoute...")
+		messages7b := []utils.ChatMessage{
+			utils.NewChatMessage("user", "Hello HTTPRoute"),
+		}
+		utils.CheckChatCompletions(t, "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", messages7b)
 	})
-
-	// 3. Deploy HTTPRoute pointing to the 7b InferencePool
-	t.Log("Deploying HTTPRoute...")
-	httpRoute := utils.LoadYAMLFromFile[gatewayv1.HTTPRoute]("examples/kthena-router/HTTPRoute.yaml")
-	httpRoute.Namespace = testNamespace
-	httpRoute.Name = "llm-route-7b"
-
-	// Update parentRefs to point to the kthena installation namespace (reuse ktNamespace from above)
-	ktNamespace = gatewayv1.Namespace(kthenaNamespace)
-	if len(httpRoute.Spec.ParentRefs) > 0 {
-		for i := range httpRoute.Spec.ParentRefs {
-			httpRoute.Spec.ParentRefs[i].Namespace = &ktNamespace
-		}
-	}
-
-	// Update backendRefs to point to the 7b InferencePool
-	if len(httpRoute.Spec.Rules) > 0 && len(httpRoute.Spec.Rules[0].BackendRefs) > 0 {
-		backendRefName := gatewayv1.ObjectName("deepseek-r1-7b")
-		httpRoute.Spec.Rules[0].BackendRefs[0].Name = backendRefName
-	}
-
-	createdHTTPRoute, err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Create(ctx, httpRoute, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create HTTPRoute")
-
-	t.Cleanup(func() {
-		if err := testCtx.GatewayClient.GatewayV1().HTTPRoutes(testNamespace).Delete(context.Background(), createdHTTPRoute.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete HTTPRoute %s/%s: %v", testNamespace, createdHTTPRoute.Name, err)
-		}
-	})
-
-	// 4. Test accessing both models
-	// Test ModelRoute/ModelServer API - deepseek-r1-1-5b via ModelRoute
-	t.Log("Testing ModelRoute/ModelServer API - accessing deepseek-r1-1-5b via ModelRoute...")
-	messages1_5b := []utils.ChatMessage{
-		utils.NewChatMessage("user", "Hello ModelRoute"),
-	}
-	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages1_5b)
-
-	// Test HTTPRoute/InferencePool API - deepseek-r1-7b via HTTPRoute
-	t.Log("Testing HTTPRoute/InferencePool API - accessing deepseek-r1-7b via HTTPRoute...")
-	messages7b := []utils.ChatMessage{
-		utils.NewChatMessage("user", "Hello HTTPRoute"),
-	}
-	utils.CheckChatCompletions(t, "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", messages7b)
 }

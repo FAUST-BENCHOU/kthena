@@ -38,18 +38,24 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	timer := framework.NewTestTimer("controller-manager")
+	framework.SetGlobalTimer(timer)
+	
 	testNamespace = "kthena-e2e-controller-" + utils.RandomString(5)
 
 	config := framework.NewDefaultConfig()
 	// Controller manager tests need workload enabled
 	config.WorkloadEnabled = true
 
+	timer.StartSetup("InstallKthena")
 	if err := framework.InstallKthena(config); err != nil {
 		fmt.Printf("Failed to install kthena: %v\n", err)
 		os.Exit(1)
 	}
+	timer.EndSetup("InstallKthena")
 
 	// Create test namespace
+	timer.StartSetup("CreateTestNamespace")
 	kubeConfig, err := utils.GetKubeConfig()
 	if err != nil {
 		fmt.Printf("Failed to get kubeconfig: %v\n", err)
@@ -77,9 +83,10 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	fmt.Printf("Created test namespace: %s\n", testNamespace)
+	timer.EndSetup("CreateTestNamespace")
 
 	// Run tests
-	code := m.Run()
+	code := timer.RunTests(m)
 
 	// Cleanup test namespace
 	fmt.Printf("Deleting test namespace: %s\n", testNamespace)
