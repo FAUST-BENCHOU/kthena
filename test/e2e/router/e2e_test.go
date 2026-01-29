@@ -34,6 +34,9 @@ var (
 
 // TestMain runs setup and cleanup for all tests in this package.
 func TestMain(m *testing.M) {
+	timer := framework.NewTestTimer("router")
+	framework.SetGlobalTimer(timer)
+
 	testNamespace = "kthena-e2e-router-" + utils.RandomString(5)
 
 	config := framework.NewDefaultConfig()
@@ -41,36 +44,44 @@ func TestMain(m *testing.M) {
 	// Router tests need networking enabled
 	config.NetworkingEnabled = true
 
+	timer.StartSetup("InstallKthena")
 	if err := framework.InstallKthena(config); err != nil {
 		fmt.Printf("Failed to install kthena: %v\n", err)
 		os.Exit(1)
 	}
+	timer.EndSetup("InstallKthena")
 
 	var err error
+	timer.StartSetup("CreateRouterTestContext")
 	testCtx, err = routercontext.NewRouterTestContext(testNamespace)
 	if err != nil {
 		fmt.Printf("Failed to create router test context: %v\n", err)
 		_ = framework.UninstallKthena(config.Namespace)
 		os.Exit(1)
 	}
+	timer.EndSetup("CreateRouterTestContext")
 
 	// Create test namespace
+	timer.StartSetup("CreateTestNamespace")
 	if err := testCtx.CreateTestNamespace(); err != nil {
 		fmt.Printf("Failed to create test namespace: %v\n", err)
 		_ = framework.UninstallKthena(config.Namespace)
 		os.Exit(1)
 	}
+	timer.EndSetup("CreateTestNamespace")
 
 	// Setup common components
+	timer.StartSetup("SetupCommonComponents")
 	if err := testCtx.SetupCommonComponents(); err != nil {
 		fmt.Printf("Failed to setup common components: %v\n", err)
 		_ = testCtx.DeleteTestNamespace()
 		_ = framework.UninstallKthena(config.Namespace)
 		os.Exit(1)
 	}
+	timer.EndSetup("SetupCommonComponents")
 
 	// Run tests
-	code := m.Run()
+	code := timer.RunTests(m)
 
 	// Cleanup common components
 	if err := testCtx.CleanupCommonComponents(); err != nil {
@@ -101,35 +112,47 @@ func TestMain(m *testing.M) {
 // TestModelRouteSimple tests a simple ModelRoute deployment and access.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRouteSimple(t *testing.T) {
-	TestModelRouteSimpleShared(t, testCtx, testNamespace, false, "")
+	framework.TrackTest(t, func(t *testing.T) {
+		TestModelRouteSimpleShared(t, testCtx, testNamespace, false, "")
+	})
 }
 
 // TestModelRouteMultiModels tests ModelRoute with multiple models.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRouteMultiModels(t *testing.T) {
-	TestModelRouteMultiModelsShared(t, testCtx, testNamespace, false, "")
+	framework.TrackTest(t, func(t *testing.T) {
+		TestModelRouteMultiModelsShared(t, testCtx, testNamespace, false, "")
+	})
 }
 
 // TestModelRoutePrefillDecodeDisaggregation tests PD disaggregation with ModelServing, ModelServer, and ModelRoute.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRoutePrefillDecodeDisaggregation(t *testing.T) {
-	TestModelRoutePrefillDecodeDisaggregationShared(t, testCtx, testNamespace, false, "")
+	framework.TrackTest(t, func(t *testing.T) {
+		TestModelRoutePrefillDecodeDisaggregationShared(t, testCtx, testNamespace, false, "")
+	})
 }
 
 // TestModelRouteSubset tests ModelRoute with subset routing.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRouteSubset(t *testing.T) {
-	TestModelRouteSubsetShared(t, testCtx, testNamespace, false, "")
+	framework.TrackTest(t, func(t *testing.T) {
+		TestModelRouteSubsetShared(t, testCtx, testNamespace, false, "")
+	})
 }
 
 // TestModelRouteWithRateLimit tests local rate limiting enforced by the Kthena Router.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRouteWithRateLimit(t *testing.T) {
-	TestModelRouteWithRateLimitShared(t, testCtx, testNamespace, false, "")
+	framework.TrackTest(t, func(t *testing.T) {
+		TestModelRouteWithRateLimitShared(t, testCtx, testNamespace, false, "")
+	})
 }
 
 // TestModelRouteLora tests ModelRoute with LoRA adapter routing.
 // This test runs the shared test function without Gateway API (no ParentRefs).
 func TestModelRouteLora(t *testing.T) {
-	TestModelRouteLoraShared(t, testCtx, testNamespace, false, "")
+	framework.TrackTest(t, func(t *testing.T) {
+		TestModelRouteLoraShared(t, testCtx, testNamespace, false, "")
+	})
 }
