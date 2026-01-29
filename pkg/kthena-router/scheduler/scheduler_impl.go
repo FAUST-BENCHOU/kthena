@@ -141,6 +141,11 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			klog.V(4).Info("Running score plugins for prefill pod")
 			scores = s.RunScorePlugins(selectedPods, ctx)
 			bestPrefillPod := TopNPodInfos(scores, 1)
+			if len(bestPrefillPod) == 0 {
+				klog.V(4).InfoS("no valid prefill pods after scoring, skipping",
+					"decode instance", klog.KObj(decodePod.Pod))
+				continue
+			}
 			prefillPods[i] = bestPrefillPod[0]
 		}
 		ctx.PrefillPods = prefillPods
