@@ -937,35 +937,34 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		klog.Errorf("failed to set role %s/%s status: %v", groupName, roleID, err)
 		return
 	}
-
+	var deleteErr error
 	defer func() {
-		if err != nil {
-			// Due to the failure to delete the role.
-			// It is necessary to roll back the roleStatus to enable subsequent deletion of the role.
-			rollbackErr := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, roleStatus)
-			if rollbackErr != nil {
-				klog.Errorf("failed to set role %s/%s status: %v", groupName, roleID, rollbackErr)
-			}
-			c.enqueueModelServing(ms)
+		if deleteErr == nil {
+			return
 		}
+		rollbackErr := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, roleStatus)
+		if rollbackErr != nil {
+			klog.ErrorS(rollbackErr, "Failed to rollback role status", "role", roleID, "group", groupName)
+		}
+		c.enqueueModelServing(ms)
 	}()
 
-	// Delete all pods in role
-	err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).DeleteCollection(
+	deleteErr = c.kubeClientSet.CoreV1().Pods(ms.Namespace).DeleteCollection(
 		ctx,
 		metav1.DeleteOptions{},
 		metav1.ListOptions{
 			LabelSelector: selector.String(),
 		},
 	)
-	if err != nil {
-		klog.Errorf("failed to delete pods of role %s/%s: %v", groupName, roleID, err)
+	if deleteErr != nil {
+		klog.Errorf("failed to delete pods of role %s/%s: %v", groupName, roleID, deleteErr)
 		return
 	}
 	// There is no DeleteCollection operation in the service of client-go. We need to list and delete them one by one.
 	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, roleName, roleID)
 	services, err := c.getServicesByIndex(RoleIDKey, roleIDValue)
 	if err != nil {
+		deleteErr = err
 		klog.Errorf("failed to get service %v", err)
 		return
 	}
@@ -975,8 +974,8 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 			if apierrors.IsNotFound(deleteSvcErr) {
 				klog.V(4).Infof("service %s/%s has been deleted", ms.Namespace, svc.Name)
 			} else {
-				err = deleteSvcErr
-				klog.Errorf("failed to delete service %s/%s: %v", ms.Namespace, svc.Name, err)
+				deleteErr = deleteSvcErr
+				klog.Errorf("failed to delete service %s/%s: %v", ms.Namespace, svc.Name, deleteSvcErr)
 				return
 			}
 		}

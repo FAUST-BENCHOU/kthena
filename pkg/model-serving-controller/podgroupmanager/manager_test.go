@@ -19,7 +19,6 @@ package podgroupmanager
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
@@ -1133,9 +1132,8 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 
 		// Create a manager with a buffered channel to capture the change
 		manager := &Manager{
-			PodGroupCRDChangeCh: make(chan bool, 1),
-			volcanoClient:      volcanofake.NewSimpleClientset(),
-			store:               store,
+			volcanoClient: volcanofake.NewSimpleClientset(),
+			store:         store,
 		}
 
 		// Initially set hasPodGroupCRD to false
@@ -1178,13 +1176,7 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 		// Verify that hasPodGroupCRD is now true
 		assert.True(t, manager.hasPodGroupCRD.Load(), "hasPodGroupCRD should be true after CRD addition")
 
-		// Check if the channel received a value
-		select {
-		case value := <-manager.PodGroupCRDChangeCh:
-			assert.True(t, value, "Channel should receive true when CRD is added")
-		case <-time.After(100 * time.Millisecond):
-			t.Fatal("Expected channel to receive a value within timeout")
-		}
+		// Channel notification is no longer used; we only validate state change.
 	})
 
 	t.Run("CRD deleted - should send false to channel", func(t *testing.T) {
@@ -1193,9 +1185,8 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 
 		// Create a manager with a buffered channel to capture the change
 		manager := &Manager{
-			PodGroupCRDChangeCh: make(chan bool, 1),
-			volcanoClient:      volcanofake.NewSimpleClientset(),
-			store:               store,
+			volcanoClient: volcanofake.NewSimpleClientset(),
+			store:         store,
 		}
 
 		// Initially set hasPodGroupCRD to true
@@ -1214,13 +1205,7 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 		// Verify that hasPodGroupCRD is now false
 		assert.False(t, manager.hasPodGroupCRD.Load(), "hasPodGroupCRD should be false after CRD deletion")
 
-		// Check if the channel received a value
-		select {
-		case value := <-manager.PodGroupCRDChangeCh:
-			assert.False(t, value, "Channel should receive false when CRD is deleted")
-		case <-time.After(100 * time.Millisecond):
-			t.Fatal("Expected channel to receive a value within timeout")
-		}
+		// Channel notification is no longer used; we only validate state change.
 	})
 
 	t.Run("CRD unchanged - should not send to channel", func(t *testing.T) {
@@ -1229,9 +1214,8 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 
 		// Create a manager with an unbuffered channel (to detect if anything is sent)
 		manager := &Manager{
-			PodGroupCRDChangeCh: make(chan bool, 1),
-			volcanoClient:      volcanofake.NewSimpleClientset(),
-			store:               store,
+			volcanoClient: volcanofake.NewSimpleClientset(),
+			store:         store,
 		}
 
 		// Initially set hasPodGroupCRD to true
@@ -1275,13 +1259,7 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 		// Verify that hasPodGroupCRD is still true
 		assert.True(t, manager.hasPodGroupCRD.Load(), "hasPodGroupCRD should remain true")
 
-		// Channel should not receive any value since there was no change
-		select {
-		case <-manager.PodGroupCRDChangeCh:
-			t.Fatal("Channel should not receive a value when there is no change")
-		case <-time.After(100 * time.Millisecond):
-			// Expected behavior - no value received within timeout
-		}
+		// Channel notification is no longer used; we only validate state change.
 	})
 
 	t.Run("CRD unchanged after deletion - should not send to channel", func(t *testing.T) {
@@ -1290,9 +1268,8 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 
 		// Create a manager with an unbuffered channel (to detect if anything is sent)
 		manager := &Manager{
-			PodGroupCRDChangeCh: make(chan bool, 1),
-			volcanoClient:      volcanofake.NewSimpleClientset(),
-			store:               store,
+			volcanoClient: volcanofake.NewSimpleClientset(),
+			store:         store,
 		}
 
 		// Initially set hasPodGroupCRD to false
@@ -1312,12 +1289,6 @@ func TestHandlePodGroupCRDChange(t *testing.T) {
 		// Verify that hasPodGroupCRD is still false
 		assert.False(t, manager.hasPodGroupCRD.Load(), "hasPodGroupCRD should remain false")
 
-		// Channel should not receive any value since there was no change
-		select {
-		case <-manager.PodGroupCRDChangeCh:
-			t.Fatal("Channel should not receive a value when there is no change")
-		case <-time.After(100 * time.Millisecond):
-			// Expected behavior - no value received within timeout
-		}
+		// Channel notification is no longer used; we only validate state change.
 	})
 }

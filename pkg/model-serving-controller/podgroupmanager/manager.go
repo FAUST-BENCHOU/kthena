@@ -54,7 +54,6 @@ const (
 
 // Manager manages PodGroups for gang scheduling
 type Manager struct {
-	PodGroupCRDChangeCh          chan bool
 	kubeClient                   kubernetes.Interface
 	volcanoClient                volcanoclient.Interface
 	store                        datastore.Store
@@ -73,7 +72,6 @@ type Manager struct {
 // NewManager creates a new gang scheduling manager
 func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Interface, apiextClient apiextclient.Interface, store datastore.Store, podGroupInformerInitCallback func(cache.SharedIndexInformer)) *Manager {
 	newManager := Manager{
-		PodGroupCRDChangeCh:          make(chan bool, 5),
 		kubeClient:                   kubeClient,
 		volcanoClient:                volcanoClient,
 		store:                        store,
@@ -567,19 +565,6 @@ func (m *Manager) AnnotatePodWithPodGroup(pod *corev1.Pod, ms *workloadv1alpha1.
 
 // Helper function to handle PodGroup CRD changes
 func (m *Manager) handlePodGroupCRDChange(crd *apiextv1.CustomResourceDefinition, isDeleted bool) {
-	oldValue := m.hasPodGroupCRD.Load()
-	defer func() {
-		newValue := m.hasPodGroupCRD.Load()
-		if oldValue != newValue {
-			select {
-			case m.PodGroupCRDChangeCh <- newValue:
-			default:
-				// Avoid blocking if channel is full
-				klog.V(4).Infof("PodGroupCRDChangeCh is full, skipping notification")
-			}
-		}
-	}()
-
 	if isDeleted {
 		klog.Info("[CRD Deleted] PodGroup CRD removed")
 		m.hasPodGroupCRD.Store(false)
