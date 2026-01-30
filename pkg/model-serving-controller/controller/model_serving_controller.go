@@ -580,6 +580,7 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 		if err := c.podGroupManager.CreateOrUpdatePodGroup(ctx, ms, groupName); err != nil {
 			return err
 		}
+		klog.V(4).Infof("Creating ServingGroup %s at ordinal %d with revision %s", groupName, ordinal, revision)
 		// Create pods for ServingGroup using the provided roles template
 		if err := c.CreatePodsForServingGroup(ctx, ms, ordinal, revision, roles); err != nil {
 			return fmt.Errorf("create Serving group failed: %v", err)
@@ -711,6 +712,7 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 
 	// Role needs to scale down, and the ServingGroup status needs to be set to Scaling
 	err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupScaling)
+	klog.V(4).Infof("Setting ServingGroup %s/%s status to Scaling for role %s scaling down", ms.Namespace+"/"+ms.Name, groupName, targetRole.Name)
 	if err != nil {
 		klog.Errorf("failed to set ServingGroup %s/%s status: %v", ms.Namespace+"/"+ms.Name, groupName, err)
 		return
@@ -741,6 +743,7 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 
 	// Role needs to scale up, and the ServingGroup status needs to be set to Scaling
 	err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupScaling)
+	klog.V(4).Infof("Setting ServingGroup %s/%s status to Scaling for role %s scaling up", ms.Namespace+"/"+ms.Name, groupName, targetRole.Name)
 	if err != nil {
 		klog.Errorf("failed to set ServingGroup %s/%s status: %v", ms.Namespace+"/"+ms.Name, groupName, err)
 		return
@@ -842,6 +845,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		return
 	}
 	err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, datastore.RoleDeleting)
+	klog.V(4).Infof("Setting role %s/%s status to Deleting", ms.GetName(), roleID)
 	if err != nil {
 		klog.Errorf("failed to set role %s/%s status: %v", groupName, roleID, err)
 		return
@@ -912,10 +916,11 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 	}
 
 	// Count how many groups are currently not running(Unavailable)
-	currentUnavailableCount := 0
+	// When len(servingGroupList) is less than Spec.replicas, it is foreseeable that this many servingGroups should be created.
+	currentUnavailableCount := max(int(*ms.Spec.Replicas)-len(servingGroupList), 0)
 	for _, sg := range servingGroupList {
 		if sg.Status != datastore.ServingGroupRunning {
-			currentUnavailableCount++
+			currentUnavailableCount += 1
 		}
 	}
 	// Check if kthena have reached the maxUnavailable limit
@@ -924,6 +929,7 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 		klog.V(4).Infof("current unavailable ServingGroup count %d has reached the maxUnavailable limit %d, waiting for next reconcile", currentUnavailableCount, maxUnavailable)
 		return nil
 	}
+
 	// Calculate how many more groups we can delete in this reconcile.
 	groupToDelete := maxUnavailable - currentUnavailableCount
 
@@ -999,6 +1005,7 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	if ready {
 		// All pods in the ServingGroup are running, so the ServingGroup status also needs to be set to running
 		err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, datastore.ServingGroupRunning)
+		klog.V(4).Infof("ServingGroup: %s/%s status updated to Running", ms.GetName(), servingGroupName)
 		if err != nil {
 			return fmt.Errorf("failed to set ServingGroup %s status: %v", servingGroupName, err)
 		}
@@ -1030,6 +1037,7 @@ func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServin
 	roleID := utils.GetRoleID(errPod)
 	if roleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID); roleStatus == datastore.RoleRunning {
 		err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID, datastore.RoleCreating)
+		klog.V(4).Infof("Setting role %s/%s status to Creating when pod fails", ms.GetName(), roleID)
 		if err != nil {
 			klog.Warningf("failed to update role %s/%s status to Creating: %v", roleName, roleID, err)
 		} else {
@@ -1040,6 +1048,7 @@ func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServin
 	// If the ServingGroup status is already running, the status needs to be updated
 	if groupStatus := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName); groupStatus == datastore.ServingGroupRunning {
 		err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, datastore.ServingGroupCreating)
+		klog.V(4).Infof("Setting ServingGroup %s/%s status to Creating when pod fails", ms.GetName(), servingGroupName)
 		if err != nil {
 			return fmt.Errorf("update ServingGroup status failed, err:%v", err)
 		}
@@ -1110,6 +1119,7 @@ func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServ
 		} else if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName) == datastore.ServingGroupRunning {
 			// If the ServingGroup status is running when the pod fails, we need to set it to creating
 			err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, datastore.ServingGroupCreating)
+			klog.V(4).Infof("Setting ServingGroup %s/%s status to Creating when pod deleted for recreating", ms.GetName(), servingGroupName)
 			if err != nil {
 				return fmt.Errorf("failed to set ServingGroup %s status: %v", servingGroupName, err)
 			}
