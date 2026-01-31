@@ -85,7 +85,10 @@ func (l *LeastRequest) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 
 	// 2. Calculate the score for each pod as a percentage of the max base score
 	for _, info := range pods {
-		score := ((maxScore - baseScores[info]) / maxScore) * 100
+		score := 100.0
+		if maxScore > 0 {
+			score = ((maxScore - baseScores[info]) / maxScore) * 100
+		}
 		scoreResults[info] = int(score)
 	}
 
