@@ -1,5 +1,5 @@
 ---
-title: Role Status Display in ModelServing.Status
+title: Expose Role Status via Kubernetes Events
 authors:
 - "@FAUST-BENCHOU" # Authors' GitHub accounts here.
 reviewers:
@@ -11,13 +11,13 @@ creation-date: 2026-01-23
 
 ---
 
-## Role Status Display in ModelServing.Status via Kubernetes Events
+## Expose Role Status via Kubernetes Events
 
 ### Summary
 
-Currently, `ModelServing.Status` displays which `ServingGroups` are in scaling status through the `progressingGroups` field in Conditions. However, it lacks visibility into role-level status. Role status is stored in the datastore but not exposed to users, making it difficult to identify which roles have not been activated (e.g., still in Creating or Deleting state).
+`ModelServing.Status` today only reflects **ServingGroup**-level state (e.g., how many groups are created/updated/available, and which group indices are progressing). Per-role state (Creating, Running, Deleting) lives in the controller’s datastore and is not visible to users.
 
-This proposal uses Kubernetes Events to expose role status information, enabling users to monitor the activation status of all roles across all ServingGroups through standard Kubernetes tooling (e.g., `kubectl describe`, `kubectl get events`).
+This proposal exposes role status by emitting **Kubernetes Events** when a role’s state changes. Users can then see which roles are activating or scaling via `kubectl describe modelserving` and `kubectl get events`, without changing the `ModelServingStatus` API.
 
 ### Motivation
 
@@ -41,9 +41,9 @@ As an operator, I want to identify roles stuck in Deleting state to troubleshoot
 
 #### Design Details
 
-**No API Changes Required**
+**No API Changes**
 
-This proposal does not require any changes to the `ModelServingStatus` API. Instead, it leverages Kubernetes Events, which are a standard mechanism for exposing status information.
+Role status is exposed through Kubernetes Events only. The `ModelServingStatus` type and its `Conditions` remain unchanged; no new fields are added.
 
 **Implementation Details**
 
@@ -174,8 +174,6 @@ func (c *ModelServingController) handleErrorPod(...) error {
    - Events are lightweight and efficient compared to Status updates
    - Only emit when actual state transitions occur (Creating → Running, Running → Deleting, etc.)
    - Avoids polling or periodic collection of all role statuses
-
-```
 
 #### Risks and Mitigations
 
