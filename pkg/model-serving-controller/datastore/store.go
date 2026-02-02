@@ -31,6 +31,7 @@ import (
 type Store interface {
 	GetServingGroupByModelServing(modelServingName types.NamespacedName) ([]ServingGroup, error)
 	GetServingGroup(modelServingName types.NamespacedName, groupName string) *ServingGroup
+	GetServingGroupRevision(modelServingName types.NamespacedName, groupName string) (string, bool)
 	GetRunningPodNumByServingGroup(modelServingName types.NamespacedName, groupName string) (int, error)
 	GetServingGroupStatus(modelServingName types.NamespacedName, groupName string) ServingGroupStatus
 	GetRoleList(modelServingName types.NamespacedName, groupName, roleName string) ([]Role, error)
@@ -227,6 +228,18 @@ func (s *store) GetServingGroup(modelServingName types.NamespacedName, groupName
 	}
 
 	return groups[groupName]
+}
+
+// GetServingGroupRevision returns the revision of a ServingGroup.
+func (s *store) GetServingGroupRevision(modelServingName types.NamespacedName, groupName string) (string, bool) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	if groups, ok := s.servingGroup[modelServingName]; ok {
+		if group, ok := groups[groupName]; ok {
+			return group.Revision, true
+		}
+	}
+	return "", false
 }
 
 // GetServingGroupStatus returns the status of ServingGroup
