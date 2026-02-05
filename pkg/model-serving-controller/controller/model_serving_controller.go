@@ -1282,7 +1282,7 @@ func (c *ModelServingController) isServingGroupOutdated(group datastore.ServingG
 	pods, err := c.getPodsByIndex(GroupNameKey, groupNameValue)
 	if err != nil {
 		klog.Errorf("cannot list pod when check group updated,err: %v", err)
-		return true
+		return false
 	}
 	// Check all pods match the newHash
 	for _, pod := range pods {

@@ -270,6 +270,23 @@ func TestIsServingGroupOutdated(t *testing.T) {
 	}
 }
 
+func TestIsServingGroupOutdatedOnIndexerError(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	podInformer := informerFactory.Core().V1().Pods()
+	// Deliberately skip adding indexers to trigger error in getPodsByIndex
+
+	c := &ModelServingController{
+		podsInformer: podInformer.Informer(),
+	}
+
+	group := datastore.ServingGroup{Name: "test-group-0"}
+
+	// Should return false (conservative) when indexer lookup fails
+	result := c.isServingGroupOutdated(group, "default", "revision-123")
+	assert.False(t, result, "should return false on indexer error to avoid spurious deletion")
+}
+
 func TestCheckServingGroupReady(t *testing.T) {
 	ns := "default"
 	groupName := "test-group"
