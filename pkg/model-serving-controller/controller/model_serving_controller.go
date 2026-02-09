@@ -858,7 +858,7 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 			c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleID, newRevision)
 			// Emit event for new role entering Creating state
 			message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Creating", targetRole.Name, roleID, groupName)
-			c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "RoleCreating", message)
+			c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)
 		}
 	}
 }
@@ -1178,7 +1178,7 @@ func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServin
 			klog.V(2).Infof("update role %s/%s to Creating when pod fails", roleName, roleID)
 			// Emit event for role re-entering Creating state due to failure
 			message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Creating", roleName, roleID, servingGroupName)
-			c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "RoleCreating", message)
+			c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)
 		}
 	}
 
@@ -1882,7 +1882,7 @@ func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, 
 			c.store.AddRole(utils.GetNamespaceName(ms), servingGroupName, role.Name, roleID, revision)
 			// Emit event for new role entering Creating state
 			message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Creating", role.Name, roleID, servingGroupName)
-			c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "RoleCreating", message)
+			c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)
 		}
 	}
 	return nil
