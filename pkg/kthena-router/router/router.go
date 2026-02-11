@@ -785,12 +785,14 @@ func proxyRequest(
 				if parsed.Usage.CompletionTokens > 0 {
 					klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
 
+					// Always call onUsage callback to record output tokens
+					if onUsage != nil {
+						onUsage(parsed)
+					}
+
 					// The token usage is set by router, so remove it before sending to downstream
 					if v, ok := c.Get(common.TokenUsageKey); ok && v.(bool) {
 						return true
-					}
-					if onUsage != nil {
-						onUsage(parsed)
 					}
 				}
 				// Forward to downstream
