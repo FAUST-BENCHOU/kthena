@@ -26,8 +26,10 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	lwsclientset "sigs.k8s.io/lws/client-go/clientset/versioned"
 )
 
 // GetKubeConfig returns a Kubernetes REST config.
@@ -41,6 +43,24 @@ func GetKubeConfig() (*rest.Config, error) {
 
 	// Fall back to kubeconfig
 	return clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
+}
+
+// GetKubeClient returns a Kubernetes clientset.
+func GetKubeClient() (*kubernetes.Clientset, error) {
+	config, err := GetKubeConfig()
+	if err != nil {
+		return nil, err
+	}
+	return kubernetes.NewForConfig(config)
+}
+
+// GetLWSClient returns an LWS clientset.
+func GetLWSClient() (*lwsclientset.Clientset, error) {
+	config, err := GetKubeConfig()
+	if err != nil {
+		return nil, err
+	}
+	return lwsclientset.NewForConfig(config)
 }
 
 // LoadYAMLFromFile loads a YAML file from a path relative to the project root
