@@ -18,6 +18,7 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -45,6 +46,61 @@ func WaitForModelServingReady(t *testing.T, ctx context.Context, kthenaClient *c
 			expectedReplicas = *ms.Spec.Replicas
 		}
 		return ms.Status.AvailableReplicas >= expectedReplicas, nil
+	})
+	require.NoError(t, err, "ModelServing did not become ready")
+}
+
+// WaitForModelServingReadyWithProgressExtend waits for ModelServing to become ready.
+// The deadline extends by 2min each time AvailableReplicas increases, up to 15min hard max.
+func WaitForModelServingReadyWithProgressExtend(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, namespace, name string) {
+	t.Log("Waiting for ModelServing to be ready (with progress-based deadline extension)...")
+	start := time.Now()
+	initialDeadline := start.Add(5 * time.Minute)
+	hardDeadline := start.Add(15 * time.Minute)
+	deadline := initialDeadline
+	lastAvailable := int32(-1)
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+
+	err := wait.PollUntilContextTimeout(timeoutCtx, 5*time.Second, 15*time.Minute, true, func(ctx context.Context) (bool, error) {
+		now := time.Now()
+		if now.After(deadline) {
+			return false, fmt.Errorf("deadline exceeded: ModelServing did not become ready within timeout (last extended: %v)", deadline.Sub(start))
+		}
+
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("Error getting ModelServing %s, retrying: %v", name, err)
+			return false, err
+		}
+
+		expectedReplicas := int32(1)
+		if ms.Spec.Replicas != nil {
+			expectedReplicas = *ms.Spec.Replicas
+		}
+
+		if ms.Status.AvailableReplicas >= expectedReplicas {
+			return true, nil
+		}
+
+		if ms.Status.AvailableReplicas > lastAvailable {
+			lastAvailable = ms.Status.AvailableReplicas
+			extended := now.Add(2 * time.Minute)
+			newDeadline := extended
+			if initialDeadline.After(extended) {
+				newDeadline = initialDeadline
+			}
+			if newDeadline.After(deadline) {
+				deadline = newDeadline
+				if deadline.After(hardDeadline) {
+					deadline = hardDeadline
+				}
+				t.Logf("Progress: %d/%d replicas ready, deadline extended to %v", lastAvailable, expectedReplicas, deadline.Sub(start))
+			}
+		}
+
+		return false, nil
 	})
 	require.NoError(t, err, "ModelServing did not become ready")
 }

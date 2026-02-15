@@ -433,7 +433,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 
 	// Wait for the initial ModelServing to be ready
 	t.Log("Waiting for initial ModelServing (4 replicas) to be ready")
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	utils.WaitForModelServingReadyWithProgressExtend(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
 	// Verify initial state
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
@@ -497,7 +497,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	}()
 
 	// Wait for the rolling update to complete
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
+	utils.WaitForModelServingReadyWithProgressExtend(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
 
 	// Final verification
 	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
@@ -598,7 +598,7 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 
 	// Wait for ModelServing to be ready
 	t.Log("Waiting for ModelServing to be ready after controller-manager restart...")
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	utils.WaitForModelServingReadyWithProgressExtend(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
 	// Verify all expected pods are created
 	msLabelSelector := "modelserving.volcano.sh/name=" + modelServing.Name
