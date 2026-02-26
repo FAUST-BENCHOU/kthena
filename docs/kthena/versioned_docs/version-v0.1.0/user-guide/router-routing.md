@@ -6,7 +6,7 @@ This page describes the router routing features and capabilities in Kthena, base
 
 Kthena Router provides sophisticated traffic routing capabilities that enable intelligent forwarding of inference requests to appropriate backend models. The routing system is built around two core Custom Resources (CRs):
 
-- **ModelServer**: Defines backend inference service instances with their associated pods, models, and traffic policies
+- **ModelServer**: Defines backend inference service instances with their associated pods, models, and traffic policies. It uses **workloadSelector.matchLabels** to select which pods belong to it (pods must match all given labels); this applies to every ModelServer.
 - **ModelRoute**: Defines routing rules based on request characteristics such as model name, LoRA adapters, HTTP headers, and weight distribution
 
 For a detailed definition of the ModelServer and ModelRoute CRs, please refer to the [ModelRoute and ModelRoute Reference](../reference/crd/networking.serving.volcano.sh.md) pages.
@@ -258,6 +258,18 @@ spec:
   trafficPolicy:
     timeout: 10s
 ```
+
+**How `workloadSelector` works**
+
+Two layers: **matchLabels** (general) selects which pods belong to this ModelServer; **pdGroup** (PD-only) then groups and roles them.
+
+- **ModelServer**: Defines backend inference service instances with their associated pods, models, and traffic policies. It uses **workloadSelector.matchLabels** to select which pods belong to it (pods must match all given labels); this applies to every ModelServer.
+- **matchLabels**: Pods must match all key-value pairs. Used by every ModelServer.
+- **pdGroup** (only for PD-Disaggregated):
+  - **groupKey** — Label key whose value defines a PD group. Prefill and decode pods with the same value are paired (shared KV state).
+  - **prefillLabels** / **decodeLabels** — Among those pods, match these labels to classify as prefill or decode.
+
+The router sends prefill and decode for a request to a paired prefill pod and decode pod (same `groupKey` value).
 
 **ModelRoute**:
 
