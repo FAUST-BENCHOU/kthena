@@ -937,6 +937,9 @@ func TestModelRouteDuplicatePreferOldestShared(t *testing.T, testCtx *routercont
 		_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdPrebuilt.Name, metav1.DeleteOptions{})
 	})
 
+	// Ensure second route has strictly newer CreationTimestamp (API server uses second precision).
+	time.Sleep(2 * time.Second)
+
 	// Create "newer" route second (newer CreationTimestamp).
 	newerRoute := &networkingv1alpha1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
