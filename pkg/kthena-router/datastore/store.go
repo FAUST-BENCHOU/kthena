@@ -642,7 +642,8 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		found := false
 		for i, route := range routes {
 			if route.Namespace == mr.Namespace && route.Name == mr.Name {
-				routes[i] = mr                       // Update existing
+				routes[i] = mr // Update existing
+				sortModelRoutesInPlace(routes)
 				s.routes[mr.Spec.ModelName] = routes // Update the map
 				found = true
 				break
@@ -650,10 +651,12 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		}
 		if !found {
 			if len(routes) > 0 {
-				klog.Warningf("duplicate ModelRoute for model %q: %s/%s (gateway assumes model is unique, prebuilt/oldest route takes precedence)",
+				klog.Warningf("multiple ModelRoutes registered for model %q: %s/%s (routes are evaluated oldest-first; if multiple routes match, the first match wins)",
 					mr.Spec.ModelName, mr.Namespace, mr.Name)
 			}
-			s.routes[mr.Spec.ModelName] = append(routes, mr)
+			routes = append(routes, mr)
+			sortModelRoutesInPlace(routes)
+			s.routes[mr.Spec.ModelName] = routes
 		}
 	}
 
@@ -663,7 +666,8 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		found := false
 		for i, route := range loraRoutes {
 			if route.Namespace == mr.Namespace && route.Name == mr.Name {
-				loraRoutes[i] = mr              // Update existing
+				loraRoutes[i] = mr // Update existing
+				sortModelRoutesInPlace(loraRoutes)
 				s.loraRoutes[lora] = loraRoutes // Update the map
 				found = true
 				break
@@ -671,10 +675,12 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		}
 		if !found {
 			if len(loraRoutes) > 0 {
-				klog.Warningf("duplicate ModelRoute for lora %q: %s/%s (gateway assumes model is unique, prebuilt/oldest route takes precedence)",
+				klog.Warningf("multiple ModelRoutes registered for lora %q: %s/%s (routes are evaluated oldest-first; if multiple routes match, the first match wins)",
 					lora, mr.Namespace, mr.Name)
 			}
-			s.loraRoutes[lora] = append(loraRoutes, mr)
+			loraRoutes = append(loraRoutes, mr)
+			sortModelRoutesInPlace(loraRoutes)
+			s.loraRoutes[lora] = loraRoutes
 		}
 	}
 
@@ -703,6 +709,16 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 		ModelRoute: mr,
 	})
 	return nil
+}
+
+func sortModelRoutesInPlace(routes []*aiv1alpha1.ModelRoute) {
+	sort.Slice(routes, func(i, j int) bool {
+		ti, tj := routes[i].CreationTimestamp.Time, routes[j].CreationTimestamp.Time
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		return routes[i].Namespace+"/"+routes[i].Name < routes[j].Namespace+"/"+routes[j].Name
+	})
 }
 
 func (s *store) DeleteModelRoute(namespacedName string) error {
@@ -819,19 +835,8 @@ func (s *store) MatchModelServer(model string, req *http.Request, gatewayKey str
 		isLora = true
 	}
 
-	// Prefer prebuilt (oldest) ModelRoute when multiple exist for same model - ensures consistent behavior
-	sorted := make([]*aiv1alpha1.ModelRoute, len(candidateRoutes))
-	copy(sorted, candidateRoutes)
-	sort.Slice(sorted, func(i, j int) bool {
-		ti, tj := sorted[i].CreationTimestamp.Time, sorted[j].CreationTimestamp.Time
-		if !ti.Equal(tj) {
-			return ti.Before(tj)
-		}
-		return sorted[i].Namespace+"/"+sorted[i].Name < sorted[j].Namespace+"/"+sorted[j].Name
-	})
-
-	// Try each ModelRoute until we find one that matches (oldest first)
-	for _, mr := range sorted {
+	// candidateRoutes are kept sorted oldest-first by AddOrUpdateModelRoute
+	for _, mr := range candidateRoutes {
 		// Check parentRefs if specified
 		if len(mr.Spec.ParentRefs) > 0 {
 			// If gatewayKey is provided (not empty), check if ModelRoute matches the specific gateway
