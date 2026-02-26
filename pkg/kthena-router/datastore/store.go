@@ -383,14 +383,21 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 	var modelServerObj *modelServer
 	if value, ok := s.modelServer.Load(name); !ok {
 		modelServerObj = newModelServer(ms)
+		// New object — no concurrent access yet, safe to write without lock
+		if len(pods) != 0 {
+			modelServerObj.pods = pods
+		}
 	} else {
 		modelServerObj = value.(*modelServer)
+		// Existing object — concurrent readers may access modelServer and pods,
+		// so we must hold the lock to prevent data races.
+		modelServerObj.mutex.Lock()
 		modelServerObj.modelServer = ms
-	}
-
-	if len(pods) != 0 {
-		// do not operate s.pods here, which are done within pod handler
-		modelServerObj.pods = pods
+		if len(pods) != 0 {
+			// do not operate s.pods here, which are done within pod handler
+			modelServerObj.pods = pods
+		}
+		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
 	return nil
@@ -421,7 +428,7 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 
 func (s *store) GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelServer {
 	if value, ok := s.modelServer.Load(name); ok {
-		return value.(*modelServer).modelServer
+		return value.(*modelServer).getModelServer()
 	}
 	return nil
 }
@@ -1317,7 +1324,7 @@ func (s *store) GetAllModelServers() map[types.NamespacedName]*aiv1alpha1.ModelS
 	s.modelServer.Range(func(key, value any) bool {
 		if namespacedName, ok := key.(types.NamespacedName); ok {
 			if ms, ok := value.(*modelServer); ok {
-				result[namespacedName] = ms.modelServer
+				result[namespacedName] = ms.getModelServer()
 			}
 		}
 		return true
