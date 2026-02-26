@@ -710,7 +710,7 @@ func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 				Containers: []corev1.Container{
 					{
 						Name:  "test-container",
-						Image: "ngixImage",
+						Image: nginxImage,
 						Ports: []corev1.ContainerPort{
 							{
 								Name:          "http",
