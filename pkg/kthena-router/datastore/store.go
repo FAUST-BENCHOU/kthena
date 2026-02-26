@@ -650,10 +650,6 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 			}
 		}
 		if !found {
-			if len(routes) > 0 {
-				klog.Warningf("multiple ModelRoutes registered for model %q: %s/%s (routes are evaluated oldest-first; if multiple routes match, the first match wins)",
-					mr.Spec.ModelName, mr.Namespace, mr.Name)
-			}
 			routes = append(routes, mr)
 			sortModelRoutesInPlace(routes)
 			s.routes[mr.Spec.ModelName] = routes
@@ -674,10 +670,6 @@ func (s *store) AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error {
 			}
 		}
 		if !found {
-			if len(loraRoutes) > 0 {
-				klog.Warningf("multiple ModelRoutes registered for lora %q: %s/%s (routes are evaluated oldest-first; if multiple routes match, the first match wins)",
-					lora, mr.Namespace, mr.Name)
-			}
 			loraRoutes = append(loraRoutes, mr)
 			sortModelRoutesInPlace(loraRoutes)
 			s.loraRoutes[lora] = loraRoutes
