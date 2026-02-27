@@ -986,14 +986,12 @@ func toWeightedSlice(targets []*aiv1alpha1.TargetModel) ([]uint32, error) {
 }
 
 func selectFromWeightedSlice(weights []uint32) int {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-
 	totalWeight := 0
 	for _, weight := range weights {
 		totalWeight += int(weight)
 	}
 
-	randomNum := rng.Intn(totalWeight)
+	randomNum := rand.Intn(totalWeight)
 
 	for i, weight := range weights {
 		randomNum -= int(weight)
