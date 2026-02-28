@@ -294,7 +294,7 @@ spec:
 4. Prefill runs on prefill instance; decode runs on decode instance, with KV state exchanged between them (configure `kvConnector` for nixl/mooncake when needed)
 5. Response returned to client
 
-**NOTE**: Deploy [ModelServing](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelServing-ds1.5b-pd-disaggragation.yaml) with PD roles first, then apply [ModelServer](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelServer-ds1.5b-pd-disaggragation.yaml) and [ModelRoute](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelRoute-ds1.5b-pd-disaggragation.yaml).
+**NOTE**: Deploy [ModelServing](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelServing-ds1.5b-pd-disaggregation.yaml) with PD roles first, then apply [ModelServer](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelServer-ds1.5b-pd-disaggregation.yaml) and [ModelRoute](https://github.com/volcano-sh/kthena/blob/main/examples/kthena-router/ModelRoute-ds1.5b-pd-disaggregation.yaml).
 
 ---
 
