@@ -54,14 +54,64 @@ An optional `plugins` field is added to `ModelServingSpec`:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `name` | string | Plugin identifier for logging and events |
-| `type` | string | Plugin type, e.g., `BuiltIn`, `Webhook` (reserved for extension) |
+| `name` | string | Plugin type identifier; must match a registered plugin name (e.g., `demo-pod-tweaks`) |
+| `type` | string | Plugin type, e.g., `BuiltIn` (Webhook reserved for future extension) |
 | `config` | object | Plugin-specific configuration, parsed by each plugin |
-| `scope` | string (optional) | Scope: entry, worker, or all |
+| `scope` | object (optional) | Restricts where the plugin runs: `roles` (role names), `target` (Entry/Worker/All) |
 
-### Example (illustrative)
+### Developing a Custom Plugin
 
-The following is a complete ModelServing example with multiple plugins, demonstrating how to apply different built-in plugins for GPU and NPU inference scenarios:
+Built-in plugins live in `pkg/model-serving-controller/plugins/`. To add a custom plugin:
+
+1. **Implement the Plugin interface** with `Name()`, `OnPodCreate()`, and `OnPodReady()`:
+
+```go
+type Plugin interface {
+    Name() string
+    OnPodCreate(ctx context.Context, req *HookRequest) error
+    OnPodReady(ctx context.Context, req *HookRequest) error
+}
+```
+
+2. **Define a config struct** for your plugin and decode it from `spec.Config` using `DecodeJSON()`:
+
+```go
+type MyConfig struct {
+    RuntimeClassName string            `json:"runtimeClassName,omitempty"`
+    Annotations      map[string]string `json:"annotations,omitempty"`
+    Env              []corev1.EnvVar   `json:"env,omitempty"`
+}
+```
+
+3. **Implement a factory function** that constructs the plugin from `PluginSpec`:
+
+```go
+func NewMyPlugin(spec workloadv1alpha1.PluginSpec) (Plugin, error) {
+    cfg := MyConfig{}
+    if err := DecodeJSON(spec.Config, &cfg); err != nil {
+        return nil, err
+    }
+    return &MyPlugin{name: spec.Name, cfg: cfg}, nil
+}
+```
+
+4. **Register the plugin** in `init()`:
+
+```go
+func init() {
+    DefaultRegistry.Register("my-plugin-name", NewMyPlugin)
+}
+```
+
+5. **Rebuild the controller** and deploy. The plugin will be available for use in ModelServing.
+
+See `pkg/model-serving-controller/plugins/demo_plugin.go` for a reference implementation.
+
+### Using Plugins
+
+Kthena ships with a built-in demo plugin `demo-pod-tweaks` that can set `runtimeClassName`, add annotations, and inject environment variables. Use it to validate the plugin flow before developing your own.
+
+**Example: Using the demo plugin**
 
 ```yaml
 apiVersion: workload.kthena.io/v1alpha1
@@ -72,19 +122,38 @@ spec:
   schedulerName: volcano
   replicas: 2
   plugins:
-    - name: nvidia-gpu-defaults
+    - name: demo-pod-tweaks
       type: BuiltIn
       config:
         runtimeClassName: nvidia
-        gpuResourceName: nvidia.com/gpu
-        gpuCount: 1
-    - name: huawei-ascend-defaults
-      type: BuiltIn
-      config:
-        npuResourceName: huawei.com/Ascend910
-        npuCount: 1
+        annotations:
+          example.com/custom: "value"
+        env:
+          - name: CUSTOM_VAR
+            value: "custom-value"
   template:
     roles: []
+```
+
+The `demo-pod-tweaks` plugin accepts:
+
+| Config field | Type | Description |
+|--------------|------|-------------|
+| `runtimeClassName` | string | Sets `spec.runtimeClassName` on the Pod |
+| `annotations` | map[string]string | Merges annotations into the Pod |
+| `env` | []EnvVar | Appends environment variables to all containers |
+
+**Example: Scoping a plugin to specific roles or targets**
+
+```yaml
+plugins:
+  - name: demo-pod-tweaks
+    type: BuiltIn
+    scope:
+      roles: ["worker"]
+      target: Worker
+    config:
+      runtimeClassName: nvidia
 ```
 
 ### Plugin Execution Order
