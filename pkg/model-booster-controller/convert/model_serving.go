@@ -348,7 +348,7 @@ func buildSglangModelServing(model *workload.ModelBooster) (*workload.ModelServi
 	}}
 
 	runtimeURL := env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, "http://localhost:30000")
-	engineEnv := buildSglangEngineEnvVars(backend)
+	engineEnv := buildSglangEngineEnvVars(backend, &backend.Workers[0].Config)
 	data := map[string]interface{}{
 		"MODEL_SERVING_TEMPLATE_METADATA": &metav1.ObjectMeta{
 			Name: utils.GetBackendResourceName(model.Name, backend.Name), Namespace: model.Namespace,
@@ -430,7 +430,7 @@ func buildCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
 // buildSglangCommands constructs the command list for SGLang backend.
 func buildSglangCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string) ([]string, error) {
 	commands := []string{"python3", "-m", "sglang.launch_server", "--model-path", modelDownloadPath,
-		"--host", "0.0.0.0", "--enable-metrics"}
+		"--host", "0.0.0.0", "--enable-metrics", "--trust-remote-code"}
 	args, err := utils.ConvertEngineArgsFromJson(workerConfig)
 	return append(commands, args...), err
 }
@@ -564,8 +564,28 @@ func loadModelServingTemplate(templatePath string, data *map[string]interface{})
 	return modelServing, nil
 }
 
-func buildSglangEngineEnvVars(backend *workload.ModelBackend) []corev1.EnvVar {
-	return buildEngineEnvVarsWithOptional(backend, false, nil)
+func buildSglangEngineEnvVars(backend *workload.ModelBackend, workerConfig *apiextensionsv1.JSON) []corev1.EnvVar {
+	additionalEnvs := []corev1.EnvVar{}
+	if isDeviceCPU(workerConfig) {
+		additionalEnvs = append(additionalEnvs, corev1.EnvVar{Name: "SGLANG_USE_CPU_ENGINE", Value: "1"})
+	}
+	return buildEngineEnvVarsWithOptional(backend, false, additionalEnvs)
+}
+
+func isDeviceCPU(config *apiextensionsv1.JSON) bool {
+	if config == nil || config.Raw == nil {
+		return false
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(config.Raw, &m); err != nil {
+		return false
+	}
+	if v, ok := m["device"]; ok {
+		if s, ok := v.(string); ok {
+			return strings.ToLower(s) == "cpu"
+		}
+	}
+	return false
 }
 
 func buildEngineEnvVars(backend *workload.ModelBackend, additionalEnvs ...corev1.EnvVar) []corev1.EnvVar {

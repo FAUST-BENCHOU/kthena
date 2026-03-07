@@ -360,6 +360,7 @@ ModelBackend defines the configuration for a model backend.
 _Appears in:_
 - [ModelBoosterSpec](#modelboosterspec)
 
+
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the name of the backend. Can't duplicate with other ModelBackend name in the same ModelBooster CR.<br />Note: update name will cause the old modelInfer deletion and a new modelInfer creation. |  | Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
