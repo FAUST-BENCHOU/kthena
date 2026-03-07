@@ -1,0 +1,30 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: test-model-sglang-backend1
+  namespace: default
+  labels:
+    workload.serving.volcano.sh/backend-name: backend1
+    workload.serving.volcano.sh/managed-by: workload.serving.volcano.sh
+    workload.serving.volcano.sh/model-name: test-model-sglang
+    workload.serving.volcano.sh/model-uid: randomUID
+    workload.serving.volcano.sh/revision: 555596649d
+  ownerReferences:
+    - apiVersion: workload.serving.volcano.sh/v1alpha1
+      blockOwnerDeletion: true
+      controller: true
+      kind: ModelBooster
+      name: test-model-sglang
+      uid: randomUID
+spec:
+  model: "test-model-sglang"
+  inferenceEngine: "SGLang"
+  workloadSelector:
+    matchLabels:
+      workload.serving.volcano.sh/model-uid: randomUID
+  workloadPort:
+    port: 30000
+  trafficPolicy:
+    retry:
+      attempts: 5
+      retryInterval: 0s

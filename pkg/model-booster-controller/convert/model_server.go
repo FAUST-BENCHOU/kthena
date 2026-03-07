@@ -40,11 +40,16 @@ func BuildModelServer(model *workload.ModelBooster) ([]*networking.ModelServer, 
 	var modelServers []*networking.ModelServer
 	var backend = model.Spec.Backend
 	var inferenceEngine networking.InferenceEngine
+	var workloadPort int32
 	switch backend.Type {
 	case workload.ModelBackendTypeVLLM, workload.ModelBackendTypeVLLMDisaggregated:
 		inferenceEngine = networking.VLLM
+		workloadPort = 8000
+	case workload.ModelBackendTypeSGLang:
+		inferenceEngine = networking.SGLang
+		workloadPort = 30000
 	default:
-		return nil, fmt.Errorf("not support %s backend yet, please use vLLM backend", backend.Type)
+		return nil, fmt.Errorf("not support %s backend yet, please use vLLM or SGLang backend", backend.Type)
 	}
 	servedModelName := getServedModelName(model, backend)
 	pdGroup := getPdGroup(backend)
@@ -74,7 +79,7 @@ func BuildModelServer(model *workload.ModelBooster) ([]*networking.ModelServer, 
 				PDGroup: pdGroup,
 			},
 			WorkloadPort: networking.WorkloadPort{
-				Port: 8000, // todo: get port from config
+				Port: workloadPort,
 			},
 			TrafficPolicy: &networking.TrafficPolicy{
 				Retry: &networking.Retry{
