@@ -17,11 +17,14 @@ limitations under the License.
 package controller_manager
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 // TestModelCR creates a ModelBooster CR, waits for it to become active, and tests chat functionality.
@@ -44,10 +48,17 @@ func TestModelCRSglang(t *testing.T) {
 func testModelCRWithBackend(t *testing.T, model *workload.ModelBooster) {
 	ctx, kthenaClient := setupControllerManagerE2ETest(t)
 
+	kubeConfig, err := utils.GetKubeConfig()
+	require.NoError(t, err, "Failed to get kubeconfig")
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	require.NoError(t, err, "Failed to create kube client")
+
 	createdModel, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, model, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create Model CR")
 	assert.NotNil(t, createdModel)
 	t.Logf("Created Model CR: %s/%s", createdModel.Namespace, createdModel.Name)
+
+	modelServingName := model.Name + "-" + model.Spec.Backend.Name
 
 	require.Eventually(t, func() bool {
 		m, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Get(ctx, model.Name, metav1.GetOptions{})
@@ -55,12 +66,86 @@ func testModelCRWithBackend(t *testing.T, model *workload.ModelBooster) {
 			t.Logf("Get model error: %v", err)
 			return false
 		}
+		// Log Model status for debugging
+		logModelStatus(t, m)
+		// Log ModelServing status if exists
+		logModelServingStatus(t, ctx, kthenaClient, testNamespace, modelServingName)
+		// Log Pod status for ModelServing
+		logModelServingPods(t, ctx, kubeClient, testNamespace, modelServingName)
 		return meta.IsStatusConditionPresentAndEqual(m.Status.Conditions,
 			string(workload.ModelStatusConditionTypeActive), metav1.ConditionTrue)
 	}, 5*time.Minute, 5*time.Second, "Model did not become Active")
 
 	messages := []utils.ChatMessage{utils.NewChatMessage("user", "Where is the capital of China?")}
 	utils.CheckChatCompletions(t, model.Spec.Name, messages)
+}
+
+func logModelStatus(t *testing.T, m *workload.ModelBooster) {
+	condStr := "none"
+	if len(m.Status.Conditions) > 0 {
+		var parts []string
+		for _, c := range m.Status.Conditions {
+			parts = append(parts, fmt.Sprintf("%s=%s(%s)", c.Type, c.Status, c.Reason))
+		}
+		condStr = fmt.Sprintf("%v", parts)
+	}
+	t.Logf("[Model %s] conditions: %s", m.Name, condStr)
+}
+
+func logModelServingStatus(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, ns, name string) {
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Logf("[ModelServing %s] not found: %v", name, err)
+		return
+	}
+	condStr := "none"
+	if len(ms.Status.Conditions) > 0 {
+		var parts []string
+		for _, c := range ms.Status.Conditions {
+			parts = append(parts, fmt.Sprintf("%s=%s(%s)", c.Type, c.Status, c.Reason))
+		}
+		condStr = fmt.Sprintf("%v", parts)
+	}
+	t.Logf("[ModelServing %s] replicas=%d/%d, conditions: %s",
+		name, ms.Status.AvailableReplicas, ms.Status.Replicas, condStr)
+}
+
+func logModelServingPods(t *testing.T, ctx context.Context, kubeClient kubernetes.Interface, ns, modelServingName string) {
+	selector := fmt.Sprintf("%s=%s", workload.ModelServingNameLabelKey, modelServingName)
+	pods, err := kubeClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		t.Logf("[Pods for %s] list error: %v", modelServingName, err)
+		return
+	}
+	for _, p := range pods.Items {
+		phase := p.Status.Phase
+		ready := "false"
+		for _, c := range p.Status.Conditions {
+			if c.Type == corev1.PodReady {
+				ready = string(c.Status)
+				break
+			}
+		}
+		var containerStatuses []string
+		for _, cs := range p.Status.ContainerStatuses {
+			state := "unknown"
+			if cs.State.Waiting != nil {
+				state = "Waiting:" + cs.State.Waiting.Reason
+				if cs.State.Waiting.Message != "" {
+					state += "(" + cs.State.Waiting.Message + ")"
+				}
+			} else if cs.State.Running != nil {
+				state = "Running"
+			} else if cs.State.Terminated != nil {
+				state = "Terminated:" + cs.State.Terminated.Reason
+			}
+			containerStatuses = append(containerStatuses, fmt.Sprintf("%s=%s", cs.Name, state))
+		}
+		t.Logf("[Pod %s] phase=%s ready=%s containers: %v", p.Name, phase, ready, containerStatuses)
+	}
+	if len(pods.Items) == 0 {
+		t.Logf("[Pods for %s] no pods found (selector: %s)", modelServingName, selector)
+	}
 }
 
 func createValidModelBoosterForWebhookTest() *workload.ModelBooster {
