@@ -103,7 +103,7 @@ type ModelBackend struct {
 }
 
 // ModelBackendType defines the type of model backend.
-// +kubebuilder:validation:Enum=vLLM;vLLMDisaggregated
+// +kubebuilder:validation:Enum=vLLM;vLLMDisaggregated;SGLang
 type ModelBackendType string
 
 const (

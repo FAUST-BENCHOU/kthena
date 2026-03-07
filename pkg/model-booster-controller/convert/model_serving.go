@@ -44,6 +44,7 @@ const (
 	URIPrefixSeparator             = "://"
 	VllmTemplatePath               = "templates/vllm.yaml"
 	VllmDisaggregatedTemplatePath  = "templates/vllm-pd.yaml"
+	SglangTemplatePath             = "templates/sglang.yaml"
 	VllmMultiNodeServingScriptPath = "examples/online_serving/multi-node-serving.sh"
 	modelRouteRuleName             = "default"
 	// /dev/shm is too small to support NCCL, we need a larger memory volume
@@ -63,6 +64,8 @@ func BuildModelServing(model *workload.ModelBooster) (*workload.ModelServing, er
 		serving, err = buildVllmModelServing(model)
 	case workload.ModelBackendTypeVLLMDisaggregated:
 		serving, err = buildVllmDisaggregatedModelServing(model)
+	case workload.ModelBackendTypeSGLang:
+		serving, err = buildSglangModelServing(model)
 	default:
 		return nil, fmt.Errorf("not support model backend type: %s", backend.Type)
 	}
@@ -310,6 +313,86 @@ func buildVllmModelServing(model *workload.ModelBooster) (*workload.ModelServing
 	return loadModelServingTemplate(VllmTemplatePath, &data)
 }
 
+// buildSglangModelServing handles SGLang backend creation.
+func buildSglangModelServing(model *workload.ModelBooster) (*workload.ModelServing, error) {
+	backend := &model.Spec.Backend
+	workersMap := mapWorkers(backend.Workers)
+	if workersMap[workload.ModelWorkerTypeServer] == nil {
+		return nil, fmt.Errorf("server worker not found in backend: %s", backend.Name)
+	}
+	cacheVolume, err := buildCacheVolume(backend)
+	if err != nil {
+		return nil, err
+	}
+	modelDownloadPath := GetCachePath(backend.CacheURI) + GetMountPath(backend.ModelURI)
+	commands, err := buildSglangCommands(&backend.Workers[0].Config, modelDownloadPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var envVars []corev1.EnvVar
+	endpointEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.Endpoint, []corev1.EnvVar{{Name: env.Endpoint}})
+	if len(endpointEnvVars) > 0 && endpointEnvVars[0].Value != "" {
+		envVars = append(envVars, endpointEnvVars[0])
+	}
+	hfEndpointEnvVars := env.GetEnvValueOrDefault[[]corev1.EnvVar](backend, env.HfEndpoint, []corev1.EnvVar{{Name: env.HfEndpoint}})
+	if len(hfEndpointEnvVars) > 0 && hfEndpointEnvVars[0].Value != "" {
+		envVars = append(envVars, hfEndpointEnvVars[0])
+	}
+	initContainers := []corev1.Container{{
+		Name:  model.Name + "-model-downloader",
+		Image: config.Config.DownloaderImage(),
+		Args:  []string{"--source", backend.ModelURI, "--output-dir", modelDownloadPath},
+		Env:   envVars, EnvFrom: backend.EnvFrom,
+		VolumeMounts: []corev1.VolumeMount{{Name: cacheVolume.Name, MountPath: GetCachePath(backend.CacheURI)}},
+	}}
+
+	runtimeURL := env.GetEnvValueOrDefault[string](backend, env.RuntimeUrl, "http://localhost:30000")
+	engineEnv := buildSglangEngineEnvVars(backend, &backend.Workers[0].Config)
+	data := map[string]interface{}{
+		"MODEL_SERVING_TEMPLATE_METADATA": &metav1.ObjectMeta{
+			Name: utils.GetBackendResourceName(model.Name, backend.Name), Namespace: model.Namespace,
+			Labels: utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: workload.GroupVersion.String(), Kind: workload.ModelKind.Kind,
+				Name: model.Name, UID: model.UID,
+			}},
+		},
+		"MODEL_NAME": model.Name, "BACKEND_NAME": strings.ToLower(backend.Name),
+		"BACKEND_REPLICAS": backend.MinReplicas, "BACKEND_TYPE": strings.ToLower(string(backend.Type)),
+		"ENGINE_ENV": engineEnv, "WORKER_ENV": backend.Env,
+		"SERVER_REPLICAS": workersMap[workload.ModelWorkerTypeServer].Replicas,
+		"SERVER_ENTRY_TEMPLATE_METADATA": &metav1.ObjectMeta{
+			Labels: utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
+		},
+		"SERVER_WORKER_TEMPLATE_METADATA": &metav1.ObjectMeta{
+			Labels: utils.GetModelControllerLabels(model, backend.Name, icUtils.Revision(backend)),
+		},
+		"VOLUMES": []*corev1.Volume{
+			cacheVolume,
+			{Name: dshm, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
+		},
+		"VOLUME_MOUNTS": []corev1.VolumeMount{
+			{Name: cacheVolume.Name, MountPath: GetCachePath(backend.CacheURI)},
+			{Name: dshm, MountPath: "/dev/shm"},
+		},
+		"INIT_CONTAINERS":                    initContainers,
+		"MODEL_DOWNLOAD_ENVFROM":             backend.EnvFrom,
+		"MODEL_SERVING_RUNTIME_IMAGE":        config.Config.RuntimeImage(),
+		"MODEL_SERVING_RUNTIME_PORT":         env.GetEnvValueOrDefault[int32](backend, env.RuntimePort, 8100),
+		"MODEL_SERVING_RUNTIME_URL":          runtimeURL,
+		"MODEL_SERVING_RUNTIME_METRICS_PATH": env.GetEnvValueOrDefault[string](backend, env.RuntimeMetricsPath, "/metrics"),
+		"MODEL_SERVING_RUNTIME_ENGINE":       "sglang",
+		"MODEL_SERVING_RUNTIME_POD":          "$(POD_NAME).$(NAMESPACE)",
+		"ENGINE_SERVER_RESOURCES":            workersMap[workload.ModelWorkerTypeServer].Resources,
+		"ENGINE_SERVER_IMAGE":                workersMap[workload.ModelWorkerTypeServer].Image,
+		"ENGINE_SERVER_COMMAND":              commands,
+		"WORKER_REPLICAS":                    0,
+		"SCHEDULER_NAME":                     backend.SchedulerName,
+	}
+	return loadModelServingTemplate(SglangTemplatePath, &data)
+}
+
 // mapWorkers creates a map of workers by type.
 func mapWorkers(workers []workload.ModelWorker) map[workload.ModelWorkerType]*workload.ModelWorker {
 	workersMap := make(map[workload.ModelWorkerType]*workload.ModelWorker, len(workers))
@@ -323,7 +406,7 @@ func mapWorkers(workers []workload.ModelWorker) map[workload.ModelWorkerType]*wo
 func buildCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
 	workersMap map[workload.ModelWorkerType]*workload.ModelWorker) ([]string, error) {
 	commands := []string{"python3", "-m", "vllm.entrypoints.openai.api_server", "--model", modelDownloadPath}
-	args, err := utils.ConvertVLLMArgsFromJson(workerConfig)
+	args, err := utils.ConvertEngineArgsFromJson(workerConfig)
 	commands = append(commands, args...)
 	if workersMap[workload.ModelWorkerTypeServer] != nil && workersMap[workload.ModelWorkerTypeServer].Pods > 1 {
 		commands = append(commands, "--distributed_executor_backend", "ray")
@@ -342,6 +425,14 @@ func buildCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string,
 	}
 
 	return commands, err
+}
+
+// buildSglangCommands constructs the command list for SGLang backend.
+func buildSglangCommands(workerConfig *apiextensionsv1.JSON, modelDownloadPath string) ([]string, error) {
+	commands := []string{"python3", "-m", "sglang.launch_server", "--model-path", modelDownloadPath,
+		"--host", "0.0.0.0", "--enable-metrics", "--trust-remote-code"}
+	args, err := utils.ConvertEngineArgsFromJson(workerConfig)
+	return append(commands, args...), err
 }
 
 // hasGPU returns true if any worker in the map requests GPU resources (nvidia.com/gpu).
@@ -473,7 +564,35 @@ func loadModelServingTemplate(templatePath string, data *map[string]interface{})
 	return modelServing, nil
 }
 
+func buildSglangEngineEnvVars(backend *workload.ModelBackend, workerConfig *apiextensionsv1.JSON) []corev1.EnvVar {
+	additionalEnvs := []corev1.EnvVar{}
+	if isDeviceCPU(workerConfig) {
+		additionalEnvs = append(additionalEnvs, corev1.EnvVar{Name: "SGLANG_USE_CPU_ENGINE", Value: "1"})
+	}
+	return buildEngineEnvVarsWithOptional(backend, false, additionalEnvs)
+}
+
+func isDeviceCPU(config *apiextensionsv1.JSON) bool {
+	if config == nil || config.Raw == nil {
+		return false
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(config.Raw, &m); err != nil {
+		return false
+	}
+	if v, ok := m["device"]; ok {
+		if s, ok := v.(string); ok {
+			return strings.ToLower(s) == "cpu"
+		}
+	}
+	return false
+}
+
 func buildEngineEnvVars(backend *workload.ModelBackend, additionalEnvs ...corev1.EnvVar) []corev1.EnvVar {
+	return buildEngineEnvVarsWithOptional(backend, true, additionalEnvs)
+}
+
+func buildEngineEnvVarsWithOptional(backend *workload.ModelBackend, vllmV1 bool, additionalEnvs []corev1.EnvVar) []corev1.EnvVar {
 	standardEnvs := []corev1.EnvVar{
 		{
 			Name: "POD_NAME",
@@ -487,8 +606,12 @@ func buildEngineEnvVars(backend *workload.ModelBackend, additionalEnvs ...corev1
 				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
 			},
 		},
-		{Name: "VLLM_USE_V1", Value: "1"},
-		{
+	}
+	if vllmV1 {
+		standardEnvs = append(standardEnvs, corev1.EnvVar{Name: "VLLM_USE_V1", Value: "1"})
+	}
+	standardEnvs = append(standardEnvs,
+		corev1.EnvVar{
 			Name: "REDIS_HOST",
 			ValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
@@ -498,7 +621,7 @@ func buildEngineEnvVars(backend *workload.ModelBackend, additionalEnvs ...corev1
 				},
 			},
 		},
-		{
+		corev1.EnvVar{
 			Name: "REDIS_PORT",
 			ValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
@@ -508,7 +631,7 @@ func buildEngineEnvVars(backend *workload.ModelBackend, additionalEnvs ...corev1
 				},
 			},
 		},
-		{
+		corev1.EnvVar{
 			Name: "REDIS_PASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
@@ -518,6 +641,6 @@ func buildEngineEnvVars(backend *workload.ModelBackend, additionalEnvs ...corev1
 				},
 			},
 		},
-	}
+	)
 	return append(append(append([]corev1.EnvVar(nil), backend.Env...), standardEnvs...), additionalEnvs...)
 }

@@ -1,0 +1,30 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelBooster
+metadata:
+  name: test-model-sglang
+  namespace: default
+  uid: randomUID
+spec:
+  name: test-model-sglang
+  backend:
+    name: backend1
+    type: SGLang
+    modelURI: hf://Qwen/Qwen2.5-0.5B-Instruct
+    cacheURI: hostpath:///tmp/cache
+    minReplicas: 1
+    maxReplicas: 1
+    workers:
+      - image: metaphorprojects/sglang-cpu:latest
+        type: server
+        replicas: 1
+        pods: 1
+        config:
+          device: cpu
+          mem-fraction-static: "0.9"
+        resources:
+          requests:
+            cpu: "2"
+            memory: 4Gi
+          limits:
+            cpu: "4"
+            memory: 16Gi

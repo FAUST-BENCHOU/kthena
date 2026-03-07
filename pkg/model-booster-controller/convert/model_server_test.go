@@ -43,6 +43,11 @@ func TestBuildModelServer(t *testing.T) {
 			expected: []*networking.ModelServer{loadYaml[networking.ModelServer](t, "testdata/expected/pd-model-server.yaml")},
 		},
 		{
+			name:     "SGLang backend",
+			input:    loadYaml[registry.ModelBooster](t, "testdata/input/model-sglang.yaml"),
+			expected: []*networking.ModelServer{loadYaml[networking.ModelServer](t, "testdata/expected/model-server-sglang.yaml")},
+		},
+		{
 			name: "invalid backend type",
 			input: &registry.ModelBooster{
 				ObjectMeta: metav1.ObjectMeta{

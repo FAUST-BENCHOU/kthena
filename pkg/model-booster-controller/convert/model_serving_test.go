@@ -142,6 +142,15 @@ func TestCreateModelServingResources(t *testing.T) {
 	}
 }
 
+func TestBuildModelServingSglang(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "testdata/input/model-sglang.yaml")
+	got, err := BuildModelServing(model)
+	assert.NoError(t, err)
+	assert.NotNil(t, got)
+	assert.Equal(t, "test-model-sglang-backend1", got.Name)
+	assert.NotNil(t, got.Spec.Template)
+}
+
 func TestBuildCacheVolume(t *testing.T) {
 	tests := []struct {
 		name         string
