@@ -82,7 +82,8 @@ func ReplaceEmbeddedPlaceholders(s string, values *map[string]interface{}) (stri
 	return result.String(), nil
 }
 
-func ConvertVLLMArgsFromJson(config *apiextensionsv1.JSON) ([]string, error) {
+// ConvertEngineArgsFromJson converts JSON config to engine CLI args (--key value). Used by vLLM and SGLang.
+func ConvertEngineArgsFromJson(config *apiextensionsv1.JSON) ([]string, error) {
 	if config == nil || config.Raw == nil {
 		return []string{}, nil
 	}
@@ -98,9 +99,7 @@ func ConvertVLLMArgsFromJson(config *apiextensionsv1.JSON) ([]string, error) {
 	args := make([]string, 0, len(configMap)*2)
 	for _, key := range keys {
 		value := configMap[key]
-
 		keyStr := fmt.Sprintf("--%s", strings.ReplaceAll(key, "_", "-"))
-
 		var strValue string
 		switch v := value.(type) {
 		case string:
@@ -117,7 +116,6 @@ func ConvertVLLMArgsFromJson(config *apiextensionsv1.JSON) ([]string, error) {
 			args = append(args, strValue)
 		}
 	}
-
 	return args, nil
 }
 

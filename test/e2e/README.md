@@ -37,7 +37,9 @@ make test-e2e-cleanup
 
 #### CPU Limitations (AVX-512)
 
-Some E2E tests (e.g., `TestModelCR` in `model_booster_test.go`) use vLLM-based images (`ghcr.io/huntersman/vllm-cpu-env:latest`).
+Some E2E tests (e.g., `TestModelCR`, `TestModelCRSglang` in `model_booster_test.go`) use inference engine images:
+- vLLM: `ghcr.io/huntersman/vllm-cpu-env:latest`
+- SGLang: `metaphorprojects/sglang-cpu:latest`
 
 **Important:** The official vLLM CPU backend relies heavily on the **AVX-512** instruction set.
 

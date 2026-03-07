@@ -33,30 +33,34 @@ import (
 
 // TestModelCR creates a ModelBooster CR, waits for it to become active, and tests chat functionality.
 func TestModelCR(t *testing.T) {
+	testModelCRWithBackend(t, createTestModel())
+}
+
+// TestModelCRSglang creates a ModelBooster CR with SGLang backend, waits for it to become active, and tests chat.
+func TestModelCRSglang(t *testing.T) {
+	testModelCRWithBackend(t, createTestModelSglang())
+}
+
+func testModelCRWithBackend(t *testing.T, model *workload.ModelBooster) {
 	ctx, kthenaClient := setupControllerManagerE2ETest(t)
 
-	// Create a Model CR in the test namespace
-	model := createTestModel()
 	createdModel, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, model, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create Model CR")
 	assert.NotNil(t, createdModel)
 	t.Logf("Created Model CR: %s/%s", createdModel.Namespace, createdModel.Name)
-	// Wait for the Model to be Active
+
 	require.Eventually(t, func() bool {
-		model, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Get(ctx, model.Name, metav1.GetOptions{})
+		m, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Get(ctx, model.Name, metav1.GetOptions{})
 		if err != nil {
 			t.Logf("Get model error: %v", err)
 			return false
 		}
-		return true == meta.IsStatusConditionPresentAndEqual(model.Status.Conditions,
+		return meta.IsStatusConditionPresentAndEqual(m.Status.Conditions,
 			string(workload.ModelStatusConditionTypeActive), metav1.ConditionTrue)
 	}, 5*time.Minute, 5*time.Second, "Model did not become Active")
-	// Test chat via port-forward
-	messages := []utils.ChatMessage{
-		utils.NewChatMessage("user", "Where is the capital of China?"),
-	}
-	utils.CheckChatCompletions(t, "test-model", messages)
-	// TODO(user): Add tests for updating and deleting ModelBooster
+
+	messages := []utils.ChatMessage{utils.NewChatMessage("user", "Where is the capital of China?")}
+	utils.CheckChatCompletions(t, model.Spec.Name, messages)
 }
 
 func createValidModelBoosterForWebhookTest() *workload.ModelBooster {
@@ -96,6 +100,43 @@ func createTestModel() *workload.ModelBooster {
 					{
 						Type:      workload.ModelWorkerTypeServer,
 						Image:     "ghcr.io/huntersman/vllm-cpu-env:latest",
+						Replicas:  1,
+						Pods:      1,
+						Config:    *config,
+						Resources: corev1ResourceRequirements(),
+					},
+				},
+			},
+		},
+	}
+}
+
+func createTestModelSglang() *workload.ModelBooster {
+	config := &apiextensionsv1.JSON{}
+	configRaw := `{
+		"device": "cpu",
+		"mem-fraction-static": "0.9"
+	}`
+	config.Raw = []byte(configRaw)
+
+	return &workload.ModelBooster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-model-sglang",
+			Namespace: testNamespace,
+		},
+		Spec: workload.ModelBoosterSpec{
+			Name: "test-model-sglang",
+			Backend: workload.ModelBackend{
+				Name:        "backend1",
+				Type:        workload.ModelBackendTypeSGLang,
+				ModelURI:    "hf://Qwen/Qwen2.5-0.5B-Instruct",
+				CacheURI:    "hostpath:///tmp/cache",
+				MinReplicas: 1,
+				MaxReplicas: 1,
+				Workers: []workload.ModelWorker{
+					{
+						Type:      workload.ModelWorkerTypeServer,
+						Image:     "metaphorprojects/sglang-cpu:latest",
 						Replicas:  1,
 						Pods:      1,
 						Config:    *config,
