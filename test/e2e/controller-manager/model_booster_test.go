@@ -126,6 +126,21 @@ func logModelServingPods(t *testing.T, ctx context.Context, kubeClient kubernete
 				break
 			}
 		}
+		var initStatuses []string
+		for _, ics := range p.Status.InitContainerStatuses {
+			state := "unknown"
+			if ics.State.Waiting != nil {
+				state = "Waiting:" + ics.State.Waiting.Reason
+				if ics.State.Waiting.Message != "" {
+					state += "(" + ics.State.Waiting.Message + ")"
+				}
+			} else if ics.State.Running != nil {
+				state = "Running"
+			} else if ics.State.Terminated != nil {
+				state = "Terminated:" + ics.State.Terminated.Reason
+			}
+			initStatuses = append(initStatuses, fmt.Sprintf("%s=%s", ics.Name, state))
+		}
 		var containerStatuses []string
 		for _, cs := range p.Status.ContainerStatuses {
 			state := "unknown"
@@ -141,7 +156,16 @@ func logModelServingPods(t *testing.T, ctx context.Context, kubeClient kubernete
 			}
 			containerStatuses = append(containerStatuses, fmt.Sprintf("%s=%s", cs.Name, state))
 		}
-		t.Logf("[Pod %s] phase=%s ready=%s containers: %v", p.Name, phase, ready, containerStatuses)
+		t.Logf("[Pod %s] phase=%s ready=%s initContainers: %v containers: %v", p.Name, phase, ready, initStatuses, containerStatuses)
+		// Log pod events when Pending to help debug scheduling/startup issues
+		if phase == corev1.PodPending {
+			events, err := kubeClient.CoreV1().Events(ns).List(ctx, metav1.ListOptions{FieldSelector: fmt.Sprintf("involvedObject.name=%s", p.Name)})
+			if err == nil && len(events.Items) > 0 {
+				for _, e := range events.Items {
+					t.Logf("[Pod %s] event: %s %s: %s", p.Name, e.Reason, e.Type, e.Message)
+				}
+			}
+		}
 	}
 	if len(pods.Items) == 0 {
 		t.Logf("[Pods for %s] no pods found (selector: %s)", modelServingName, selector)
