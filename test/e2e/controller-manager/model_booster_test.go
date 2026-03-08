@@ -58,6 +58,8 @@ func testModelCRWithBackend(t *testing.T, model *workload.ModelBooster) {
 	assert.NotNil(t, createdModel)
 	t.Logf("Created Model CR: %s/%s", createdModel.Namespace, createdModel.Name)
 
+	modelServingName := model.Name + "-" + model.Spec.Backend.Name
+
 	// Cleanup model after test to free CPU for subsequent tests (e.g. TestModelCRSglang runs after TestModelCR)
 	t.Cleanup(func() {
 		_ = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(ctx, model.Name, metav1.DeleteOptions{})
@@ -71,8 +73,6 @@ func testModelCRWithBackend(t *testing.T, model *workload.ModelBooster) {
 			return len(pods.Items) == 0
 		}, 90*time.Second, 3*time.Second, "Pods not terminated in time")
 	})
-
-	modelServingName := model.Name + "-" + model.Spec.Backend.Name
 
 	require.Eventually(t, func() bool {
 		m, err := kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Get(ctx, model.Name, metav1.GetOptions{})
