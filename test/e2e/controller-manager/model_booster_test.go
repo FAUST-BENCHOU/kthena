@@ -58,6 +58,20 @@ func testModelCRWithBackend(t *testing.T, model *workload.ModelBooster) {
 	assert.NotNil(t, createdModel)
 	t.Logf("Created Model CR: %s/%s", createdModel.Namespace, createdModel.Name)
 
+	// Cleanup model after test to free CPU for subsequent tests (e.g. TestModelCRSglang runs after TestModelCR)
+	t.Cleanup(func() {
+		_ = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Delete(ctx, model.Name, metav1.DeleteOptions{})
+		// Wait for pods to be gone so resources are freed for next test
+		selector := fmt.Sprintf("%s=%s", workload.ModelServingNameLabelKey, modelServingName)
+		require.Eventually(t, func() bool {
+			pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+			if err != nil {
+				return false
+			}
+			return len(pods.Items) == 0
+		}, 90*time.Second, 3*time.Second, "Pods not terminated in time")
+	})
+
 	modelServingName := model.Name + "-" + model.Spec.Backend.Name
 
 	require.Eventually(t, func() bool {
@@ -249,10 +263,24 @@ func createTestModelSglang() *workload.ModelBooster {
 						Replicas:  1,
 						Pods:      1,
 						Config:    *config,
-						Resources: corev1ResourceRequirements(),
+						Resources: sglangResourceRequirements(),
 					},
 				},
 			},
+		},
+	}
+}
+
+// sglangResourceRequirements returns lighter resources for SGLang e2e to fit CI (runs after TestModelCR which already consumes CPU).
+func sglangResourceRequirements() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1"),
+			corev1.ResourceMemory: resource.MustParse("2Gi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("2"),
+			corev1.ResourceMemory: resource.MustParse("8Gi"),
 		},
 	}
 }
