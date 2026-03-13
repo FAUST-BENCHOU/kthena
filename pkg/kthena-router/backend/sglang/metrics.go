@@ -29,6 +29,7 @@ import (
 var (
 	GPUCacheUsage     = "sglang:token_usage"
 	RequestWaitingNum = "sglang:num_queue_reqs"
+	RequestRunningNum = "sglang:num_running_reqs"
 	TPOT              = "sglang:time_per_output_token_seconds"
 	TTFT              = "sglang:time_to_first_token_seconds"
 )
@@ -37,6 +38,7 @@ var (
 	CounterAndGaugeMetrics = []string{
 		GPUCacheUsage,
 		RequestWaitingNum,
+		RequestRunningNum,
 	}
 
 	HistogramMetrics = []string{
@@ -47,6 +49,7 @@ var (
 	mapOfMetricsName = map[string]string{
 		GPUCacheUsage:     utils.GPUCacheUsage,
 		RequestWaitingNum: utils.RequestWaitingNum,
+		RequestRunningNum: utils.RequestRunningNum,
 		TPOT:              utils.TPOT,
 		TTFT:              utils.TTFT,
 	}
@@ -83,7 +86,15 @@ func (engine *sglangEngine) GetCountMetricsInfo(allMetrics map[string]*dto.Metri
 			continue
 		}
 		for _, metric := range metricInfo.Metric {
-			metricValue := metric.GetCounter().GetValue()
+			var metricValue float64
+			switch metricInfo.GetType() {
+			case dto.MetricType_GAUGE:
+				metricValue = metric.GetGauge().GetValue()
+			case dto.MetricType_COUNTER:
+				metricValue = metric.GetCounter().GetValue()
+			default:
+				continue
+			}
 			wantMetrics[mapOfMetricsName[metricName]] = metricValue
 		}
 	}
