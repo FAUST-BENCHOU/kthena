@@ -1768,6 +1768,14 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 func (c *ModelServingController) getPartition(ms *workloadv1alpha1.ModelServing) int {
 	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration != nil && ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
 		partition := ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition
+		if partition.Type == intstr.Int {
+			return int(partition.IntVal)
+		}
+		// Percentage partition requires replicas to compute the absolute value.
+		if ms.Spec.Replicas == nil {
+			klog.Warningf("ModelServing %s/%s has nil spec.replicas; defaulting partition to 0", ms.Namespace, ms.Name)
+			return 0
+		}
 		replicas := int(*ms.Spec.Replicas)
 		partitionValue, err := intstr.GetScaledValueFromIntOrPercent(partition, replicas, true)
 		if err != nil {
