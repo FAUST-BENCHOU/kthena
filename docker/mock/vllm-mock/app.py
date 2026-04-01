@@ -1,5 +1,4 @@
-# Copyright 2024 The AIBrix Authors
-# Copyright 2025 The Volcano Authors
+# Copyright The Volcano Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -9,17 +8,16 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR ANY KIND, either express or implied.
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# This mock server emulates the vLLM OpenAI HTTP API and Prometheus metric names
-# used by the vLLM inference engine (https://github.com/vllm-project/vllm).
-# vLLM is licensed under the Apache License, Version 2.0.
+# Portions derived from the AIBrix project (https://github.com/vllm-project/aibrix).
+# This mock emulates the vLLM OpenAI HTTP API and Prometheus metric names used by
+# vLLM (https://github.com/vllm-project/vllm; Apache-2.0).
 
 from flask import Flask, request, Response, jsonify
 from flask_httpauth import HTTPTokenAuth
-from functools import wraps
 from werkzeug import serving
 import random
 import re
@@ -169,7 +167,7 @@ models = [
 ]
 
 
-# Note: this is to supress /metrics logs, gateway sends request to pods to scrape
+# Note: this is to suppress /metrics logs, gateway sends request to pods to scrape
 # the metrics and results in lots of meaningless requests that we do not want to log.
 def disable_endpoint_logs():
     """Disable logs for requests to specific endpoints."""
@@ -508,7 +506,7 @@ def metrics():
         apps_v1 = client.AppsV1Api()
         resp = apps_v1.read_namespaced_deployment(DEPLOYMENT_NAME, NAMESPACE)
         replicas = resp.spec.replicas if resp.spec.replicas is not None else 1
-    except Exception as e:
+    except Exception:
         #print(f"Failed to get deployment information: {DEPLOYMENT_NAME=} {NAMESPACE=} error={str(e)}")
         #print(f"Due to the failure, replicas {DEFAULT_REPLICAS} will be used to calculate metrics")
         replicas = DEFAULT_REPLICAS
@@ -605,8 +603,7 @@ def metrics():
                                                         model_name, metric["value"])
         metrics_output += generate_counter_gauge_metric(metric["name"], metric["type"], metric["description"],
                                                         "lora-A", metric["value"], help_header=False)
-        
-    
+
     metrics_output += """
 # HELP vllm:lora_requests_info Running stats on lora requests.
 # TYPE vllm:lora_requests_info gauge
@@ -710,7 +707,7 @@ vllm:lora_requests_info{max_lora="1",running_lora_adapters="lora-A",waiting_lora
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
-    logging.getLogger("kubernetes.client.rest").setLevel(logging.ERROR)  # Suppress kubenetes logs
+    logging.getLogger("kubernetes.client.rest").setLevel(logging.ERROR)  # Suppress kubernetes logs
 
     print(f"Starting app. DEPLOYMENT_NAME: {DEPLOYMENT_NAME}, NAMESPACE: {NAMESPACE}, MODEL: {MODEL_NAME}")
 

@@ -1,5 +1,4 @@
-# Copyright 2024 The AIBrix Authors
-# Copyright 2025 The Volcano Authors
+# Copyright The Volcano Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# SGLang metrics mock for kthena runtime verification. Metric names and semantics
-# follow the SGLang project (https://github.com/sgl-project/sglang), licensed under
-# the Apache License, Version 2.0.
+# Portions derived from the AIBrix project (https://github.com/vllm-project/aibrix).
+# Metrics layout follows SGLang (https://github.com/sgl-project/sglang; Apache-2.0).
 #
 """
 SGLang metrics mock server for kthena runtime verification.

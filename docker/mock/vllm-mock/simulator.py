@@ -1,5 +1,4 @@
-# Copyright 2024 The AIBrix Authors
-# Copyright 2025 The Volcano Authors
+# Copyright The Volcano Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Companion module for the vLLM-compatible mock (https://github.com/vllm-project/vllm).
+# Portions derived from the AIBrix project (https://github.com/vllm-project/aibrix).
+# Companion to the vLLM-compatible mock (https://github.com/vllm-project/vllm).
 
 import threading
 import time
 import random
-from typing import Optional
 
 class Request:
     def __init__(self, arrived_at, input_tokens, output_tokens, arrived_next=0):
@@ -36,7 +35,7 @@ class Simulator:
         def dummy_run():
             while not self._terminate:
                 time.sleep(1)
-        
+
         t = threading.Thread(target=dummy_run)
         t.start()
         return t
