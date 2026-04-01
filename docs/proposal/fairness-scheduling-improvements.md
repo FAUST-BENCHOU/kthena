@@ -84,19 +84,25 @@
 
 **Impact:** A user who had low token usage at enqueue time but whose other concurrent requests finish (accumulating tokens) will still be treated as low-usage, violating the fairness invariant.
 
-### Gap 3: No Request Cancellation / Client Disconnect Handling (Medium)
+### Gap 3: No Unified Request Cancellation / Timeout Handling (Medium)
 
-**Problem:** When a client disconnects (TCP RST, context cancelled), the `Request` stays in the priority queue. `NotifyChan` is still closed when dequeued, and `doLoadbalance()` runs against a dead `gin.Context`. There is no mechanism to:
-1. Remove cancelled requests from the queue.
-2. Detect `c.Request.Context().Done()` during the wait.
+**Problem:** When a client disconnects (TCP RST, context cancelled), the `Request` stays in the priority queue. `NotifyChan` is still closed when dequeued, and `doLoadbalance()` may run after the caller is already gone. There is also no unified request-scoped timeout: the handler waits on a hard-coded `time.After(60 * time.Second)`, but that timeout does not cancel the queued item itself.
 
-**Impact:** Wasted backend capacity on dead requests; queue contains phantom entries that distort fairness ordering.
+There is no mechanism to:
+1. Remove cancelled or timed-out requests from the queue.
+2. Detect `c.Request.Context().Done()` while waiting.
+3. Ensure the queue entry and the handler share the same cancellation lifetime.
 
-### Gap 4: Queue Goroutine Lifecycle Leak (Medium)
+**Impact:** Wasted backend capacity on dead requests; queue contains phantom entries that distort fairness ordering; timed-out requests may still dequeue later.
 
-**Problem:** `Enqueue()` calls `go newQueue.Run(context.TODO(), defaultQueueQPS)` — the context is `context.TODO()` which never cancels. Queues are per-model and created lazily, but never cleaned up when a model route is deleted.
+### Gap 4: Queue Lifecycle Semantics Are Incomplete (Medium)
 
-**Impact:** Goroutine leak proportional to the number of distinct model names ever seen. Each leaked goroutine also holds a ticker and channel.
+**Problem:** `Enqueue()` calls `go newQueue.Run(context.TODO(), defaultQueueQPS)` — the context is `context.TODO()` which never cancels. The current store already removes waiting queues when a `ModelRoute` is deleted, but queue lifetime is still incomplete in two ways:
+
+1. Queue goroutines are not rooted in a parent context and therefore cannot participate in global store shutdown.
+2. `Close()` stops the queue loop, but pending waiters are not actively drained or failed with a deterministic error path.
+
+**Impact:** Queue shutdown behavior is brittle, and leaked goroutines remain possible for queues that outlive their intended lifecycle.
 
 ### Gap 5: No Multi-Model Fairness (Low-Medium)
 
@@ -133,7 +139,7 @@
 │  │              AdmissionController                  │                   │
 │  │  1. Extract userId                                │                   │
 │  │  2. Get priority (deferred to dequeue)            │                   │
-│  │  3. Enqueue with gin.Context                      │                   │
+│  │  3. Enqueue with request context + metadata       │                   │
 │  └──────────────────────────────────────────────────┘                   │
 │      │                                                                  │
 │      ▼                                                                  │
@@ -150,14 +156,15 @@
 │  │  │  │  Capacity - inFlight  │  │                  │                   │
 │  │  │  └───────────────────────┘  │                  │                   │
 │  │  │                             │                  │                   │
-│  │  │  Priority re-eval at pop:   │                  │                   │
-│  │  │  fresh GetTokenCount()      │                  │                   │
+│  │  │  Priority refresh:          │                  │                   │
+│  │  │  bounded recompute +        │                  │                   │
+│  │  │  reinsertion / rebuild      │                  │                   │
 │  │  └─────────────────────────────┘                  │                   │
 │  │                                                   │                   │
 │  │  Cancellation:                                    │                   │
-│  │  - Request carries ctx from gin.Context           │                   │
+│  │  - Request carries request-scoped ctx             │                   │
 │  │  - Cancelled entries skipped on dequeue           │                   │
-│  │  - Periodic sweep removes stale entries           │                   │
+│  │  - Close drains pending waiters with error        │                   │
 │  └──────────────────────────────────────────────────┘                   │
 │      │                                                                  │
 │      │ close(NotifyChan)                                                │
@@ -210,8 +217,10 @@ On dequeue:
   3. Close NotifyChan → request proceeds to doLoadbalance()
 
 On request completion (new callback):
-  4. Release semaphore permit → unblocks next dequeue
+    4. Release semaphore permit → unblocks next dequeue
 ```
+
+**Permit lifecycle requirement:** The permit must be released on every exit path after dequeue, including proxy success, proxy error, request timeout, streaming disconnect, and retry exhaustion. The implementation should have a single owner for permit release so capacity cannot leak.
 
 **Capacity source:** `MaxConcurrent` can be derived from:
 - Static configuration per model (simplest, recommended first).
@@ -228,31 +237,37 @@ type Request struct {
 }
 ```
 
-### 4.2 Dequeue-Time Priority Re-evaluation (Addresses Gap 2)
+### 4.2 Bounded Priority Refresh (Addresses Gap 2)
 
-**Goal:** Ensure the request with the genuinely lowest token usage is dequeued, not the one that *had* the lowest usage at enqueue time.
+**Goal:** Reduce enqueue-time priority staleness without claiming stronger correctness than the data structure can provide.
 
 **Design:**
 
-Instead of a strict heap pop, use a **lazy re-evaluation** strategy:
+Avoid the previous `top-K` heuristic as a correctness mechanism. A heap ordered by stale priorities does not guarantee that the new true minimum remains near the top after priorities drift. Instead, use a bounded refresh strategy:
 
 ```
 On popWhenAvailable():
-  1. Peek top-K items from heap (K = min(8, heap.Len()))
-  2. For each item, refresh priority: item.Priority = GetTokenCount(item.UserID, item.ModelName)
-  3. Re-heapify the peeked items
-  4. Pop the true minimum
+    1. Pop the current heap root
+    2. Refresh its priority using GetTokenCount(user, model)
+    3. If it is still admissible, dequeue it
+    4. If not, reinsert it with the refreshed priority and retry
+    5. After N refresh-and-reinsert attempts, rebuild the heap from refreshed priorities
 ```
 
-**Why top-K instead of full re-heap:** Full re-evaluation is O(n log n) on every pop. Top-K bounds the overhead to O(K log K) while capturing the most likely candidates (heap property guarantees the true minimum is within the top levels with high probability).
+This keeps the steady-state pop cost low while preserving a deterministic escape hatch when many queued priorities have drifted.
 
 **Configuration:**
 
 ```go
-// ReevalTopK controls how many top items are re-evaluated on each pop.
-// 0 disables re-evaluation (current behavior).
-ReevalTopK int  // default: 8
+// MaxPriorityRefreshRetries bounds refresh-and-reinsert loops before a heap rebuild.
+// 0 disables dequeue-time refresh (current behavior).
+MaxPriorityRefreshRetries int // default: 2
+
+// RebuildThreshold controls when to refresh all queued priorities and rebuild the heap.
+RebuildThreshold int // default: 64
 ```
+
+**Tradeoff:** This is still an approximation of ideal fairness, but it is a bounded and explicit one. The proposal should describe it as a practical mitigation, not as a proof of exact dequeue optimality.
 
 ### 4.3 Request Cancellation Support (Addresses Gap 3)
 
@@ -260,37 +275,41 @@ ReevalTopK int  // default: 8
 
 **Design:**
 
-Add a context to `Request`:
+Add a request-scoped context to `Request`:
 
 ```go
 type Request struct {
     // ... existing fields ...
-    Ctx context.Context // From c.Request.Context(); carries client lifecycle
+    Ctx context.Context // Derived from c.Request.Context(); carries client and timeout lifecycle
 }
 ```
 
 **Three-point cancellation:**
 
-1. **At enqueue:** Store `c.Request.Context()` in the `Request`.
+1. **At enqueue:** Create `reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.fairnessTimeout)` and store `reqCtx` in the `Request`.
 2. **At dequeue (in `popWhenAvailable`):** After popping, check `req.Ctx.Err() != nil`. If cancelled, skip (decrement metrics, continue to next).
-3. **At wait site (in `handleFairnessScheduling`):** Add `c.Request.Context().Done()` to the select:
+3. **At wait site (in `handleFairnessScheduling`):** Wait on the same request context used by the queue:
 
 ```go
+defer cancel()
+
 select {
 case <-queueReq.NotifyChan:
     r.doLoadbalance(c, modelRequest)
     return nil
-case <-c.Request.Context().Done():
-    // Client disconnected; request will be skipped at dequeue
+case <-reqCtx.Done():
+    if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+        return fmt.Errorf("request processing timed out in fairness queue")
+    }
     return fmt.Errorf("client disconnected while waiting in fairness queue")
-case <-time.After(r.fairnessTimeout):
-    // timeout handling (unchanged)
 }
 ```
 
+This unifies client disconnect and server-side timeout handling so the queue entry, the handler, and the eventual dequeue path share one cancellation source.
+
 ### 4.4 Queue Lifecycle Management (Addresses Gap 4)
 
-**Goal:** Prevent goroutine/resource leaks for deleted models.
+**Goal:** Make queue shutdown deterministic and compatible with store lifecycle.
 
 **Design:**
 
@@ -309,20 +328,18 @@ func (s *store) Enqueue(req *Request) error {
 }
 ```
 
-2. Register a **model-delete callback** that cancels the queue context and removes it from the `sync.Map`:
+2. Preserve the existing **model-delete cleanup** path, but make queue close semantics stronger:
 
 ```go
-store.RegisterCallback("ModelRoute", func(data EventData) {
-    if data.EventType == EventDelete {
-        if val, ok := s.requestWaitingQueue.LoadAndDelete(data.ModelName); ok {
-            queue := val.(*RequestPriorityQueue)
-            queue.Close()  // triggers cancel + drains remaining requests with error
-        }
-    }
-})
+func (pq *RequestPriorityQueue) Close(err error) {
+    // stop dequeue loop
+    // fail all pending waiters deterministically
+}
 ```
 
-3. Add an **idle timeout** (e.g., 10 minutes with no enqueue) — if a queue is empty for the idle period, auto-close and remove.
+3. Optionally add an **idle timeout** (e.g., 10 minutes with no enqueue) so empty per-model queues can self-remove.
+
+**Note:** The current code already deletes waiting queues when a `ModelRoute` is removed. The missing piece is deterministic cancellation and draining, not delete detection itself.
 
 ### 4.5 Configurable Timeout (Addresses Gap 7)
 
@@ -340,24 +357,24 @@ type FairnessConfig struct {
 Read from env in `NewRouter()`, store in the `Router` struct, and use in `handleFairnessScheduling`:
 
 ```go
-case <-time.After(r.fairnessConfig.QueueTimeout):
+reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.fairnessConfig.QueueTimeout)
 ```
 
 ### 4.6 Composite Priority Score (Addresses Gap 8)
 
-**Goal:** Factor in request count alongside token usage for a more balanced priority.
+**Goal:** Factor in request count alongside token usage for a more balanced priority, while keeping units comparable.
 
 **Design:**
 
 Extend the priority formula:
 
 ```
-priority = α × weighted_tokens + β × request_count_in_window
+priority = α × normalized_weighted_tokens + β × normalized_request_count
 ```
 
 Where:
-- `weighted_tokens` = current `GetTokenCount()` value
-- `request_count_in_window` = number of requests from this user in the sliding window
+- `normalized_weighted_tokens` = current `GetTokenCount()` value transformed onto a bounded scale
+- `normalized_request_count` = request count in the same window, also normalized
 - `α`, `β` = configurable weights (default `α=1.0`, `β=0.0` for backward compat)
 
 This requires the `TokenTracker` to also track request counts. Extend the interface:
@@ -370,7 +387,31 @@ type TokenTracker interface {
 }
 ```
 
-**Note:** `β=0.0` by default ensures no behavior change unless explicitly configured.
+**Note:** `β=0.0` by default ensures no behavior change unless explicitly configured. Without normalization, token counts and request counts live on different scales and become difficult to tune safely.
+
+### 4.7 Observability, Starvation, and Rollout Criteria
+
+**Goal:** Make the fairness system measurable and safe to roll out.
+
+**Additional metrics:**
+
+- `fairness_queue_cancelled_total`
+- `fairness_queue_timeout_total`
+- `fairness_queue_inflight`
+- `fairness_queue_dequeue_total`
+- wait latency percentiles per model (`p50/p95/p99`)
+- priority refresh / heap rebuild counters
+
+**Starvation policy:**
+
+The scheduler should define whether requests age while waiting. Without an aging rule, a perpetually low-priority user can starve under sustained high load. A simple option is to subtract a small waiting-time bonus from effective priority after a configurable delay.
+
+**Load-test acceptance criteria:**
+
+- No throughput regression when fairness is enabled under balanced load.
+- No permit leaks under success, error, timeout, and disconnect paths.
+- Queue wait percentiles stay bounded under overload.
+- Fairness skew improves versus the current fixed-QPS implementation.
 
 ---
 
@@ -380,7 +421,7 @@ type TokenTracker interface {
 
 | Item | Gap | Effort | Risk |
 |------|-----|--------|------|
-| Request cancellation support (4.3) | Gap 3 | Small | Low |
+| Unified cancellation + timeout support (4.3) | Gap 3 | Small | Low |
 | Queue lifecycle management (4.4) | Gap 4 | Small | Low |
 | Configurable timeout (4.5) | Gap 7 | Trivial | None |
 
@@ -391,7 +432,8 @@ These are bug-fixes / resource-leak fixes with no behavioral change to existing 
 | Item | Gap | Effort | Risk |
 |------|-----|--------|------|
 | Backpressure-aware dequeue (4.1) | Gap 1 | Medium | Medium — needs load testing |
-| Dequeue-time priority re-eval (4.2) | Gap 2 | Small | Low |
+| Bounded priority refresh (4.2) | Gap 2 | Medium | Medium |
+| Rollout metrics + starvation policy (4.7) | Cross-cutting | Small | Low |
 
 These improve the quality of fairness scheduling. The backpressure change should be gated behind a configuration flag initially.
 
@@ -400,36 +442,43 @@ These improve the quality of fairness scheduling. The backpressure change should
 | Item | Gap | Effort | Risk |
 |------|-----|--------|------|
 | Composite priority (4.6) | Gap 8 | Small | Low |
-| Cross-model fairness (Gap 5) | Gap 5 | Medium | Medium |
+| Cross-model fairness with normalized per-model cost | Gap 5 | Medium | Medium |
 | Distributed token tracker (Gap 6) | Gap 6 | Large | Medium — needs Redis dependency |
 
 ---
 
 ## 6. Recommended Design
 
-**Phase 1 + Phase 2 (items 4.1–4.5)** should be implemented together as a single coherent release. The recommended target architecture:
+**Phase 1 should ship first**, followed by a config-gated Phase 2. The recommended target architecture:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                 Target State Summary                         │
 ├───────────────────────┬─────────────────────────────────────┤
 │ Dequeue strategy      │ Semaphore-gated (capacity-aware)    │
-│                       │ with QPS cap as safety bound        │
+│                       │ with QPS cap as optional safety     │
+│                       │ bound                               │
 ├───────────────────────┼─────────────────────────────────────┤
-│ Priority evaluation   │ Lazy top-K re-eval at dequeue time  │
+│ Priority evaluation   │ Root refresh + bounded reinsertion  │
+│                       │ with heap rebuild fallback          │
 ├───────────────────────┼─────────────────────────────────────┤
-│ Cancellation          │ Context-propagated; skip at dequeue │
+│ Cancellation          │ Single request-scoped context for   │
+│                       │ client disconnect and timeout       │
 ├───────────────────────┼─────────────────────────────────────┤
-│ Queue lifecycle       │ Cancellable context + idle timeout   │
+│ Queue lifecycle       │ Rooted in store ctx; close drains   │
+│                       │ pending waiters deterministically   │
 ├───────────────────────┼─────────────────────────────────────┤
 │ Timeout               │ Configurable via env var             │
 ├───────────────────────┼─────────────────────────────────────┤
 │ Token tracker         │ InMemory (unchanged); interface      │
 │                       │ ready for Redis backend              │
 ├───────────────────────┼─────────────────────────────────────┤
+│ Rollout safety        │ Metrics, load tests, and explicit    │
+│                       │ anti-starvation policy               │
+├───────────────────────┼─────────────────────────────────────┤
 │ Backward compatibility│ All new behaviors gated by config;   │
 │                       │ defaults preserve current behavior   │
 └───────────────────────┴─────────────────────────────────────┘
 ```
 
-This design addresses the critical throughput mismatch (Gap 1), correctness issues (Gaps 2-4), and operability (Gap 7) while keeping the implementation incremental and backward-compatible.
+This design addresses the critical throughput mismatch (Gap 1), correctness issues (Gaps 2-4), and operability (Gap 7) while keeping the implementation incremental and backward-compatible. It also avoids overstating the correctness of dequeue-time priority refresh and makes rollout safety a first-class part of the design.
