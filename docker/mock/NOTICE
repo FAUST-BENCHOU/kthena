@@ -1,0 +1,20 @@
+KTHena mock inference images (vllm-mock, sglang-mock)
+=====================================================
+
+These container images and their Python sources were derived from the
+AIBrix project development mock application:
+  https://github.com/vllm-project/aibrix (development/app)
+
+Upstream attributions
+---------------------
+
+* vLLM (OpenAI-compatible HTTP API and Prometheus metric naming):
+  https://github.com/vllm-project/vllm
+  Copyright The vLLM contributors. Licensed under Apache License 2.0.
+
+* SGLang (Prometheus metrics conventions):
+  https://github.com/sgl-project/sglang
+  Copyright The SGLang Team. Licensed under Apache License 2.0.
+
+The mock implementations are not forks of vLLM or SGLang; they provide
+compatible endpoints and metric names for testing and development.
