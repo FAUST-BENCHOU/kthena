@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: llm-engine
-          image: ghcr.io/faust-benchou/sglang-mock:latest
+          image: ghcr.io/volcano-sh/sglang-mock:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 30000

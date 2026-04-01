@@ -2,7 +2,7 @@
 # The mock server will return a fixed response for any input.
 # You can use this mock server to test the inference router without deploying a real LLM server.
 #
-# NOTE: `ghcr.io/faust-benchou/vllm-mock:latest` — build context: `docker/mock/vllm-mock` in https://github.com/volcano-sh/kthena
+# NOTE: `ghcr.io/volcano-sh/vllm-mock:latest` — build context: `docker/mock/vllm-mock` in https://github.com/volcano-sh/kthena
 
 apiVersion: apps/v1
 kind: Deployment
@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: llm-engine
-          image: ghcr.io/faust-benchou/vllm-mock:latest
+          image: ghcr.io/volcano-sh/vllm-mock:latest
           imagePullPolicy: IfNotPresent
           env:
             # specify the model name to mock

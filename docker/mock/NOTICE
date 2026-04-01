@@ -18,3 +18,7 @@ Upstream attributions
 
 The mock implementations are not forks of vLLM or SGLang; they provide
 compatible endpoints and metric names for testing and development.
+
+Container images are published by CI to the volcano-sh organization on
+GitHub Container Registry, e.g. ghcr.io/volcano-sh/vllm-mock and
+ghcr.io/volcano-sh/sglang-mock (see https://github.com/orgs/volcano-sh/packages).
