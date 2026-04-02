@@ -182,6 +182,25 @@ func (v *KthenaRouterValidator) validateModelRoute(modelRoute *networkingv1alpha
 		}
 	}
 
+	if modelRoute.Spec.SessionSticky != nil && modelRoute.Spec.SessionSticky.Enabled {
+		ss := modelRoute.Spec.SessionSticky
+		if len(ss.Sources) == 0 {
+			allErrs = append(allErrs, field.Invalid(specField.Child("sessionSticky"), ss, "sources must be non-empty when sessionSticky is enabled"))
+		}
+		backend := networkingv1alpha1.SessionStickyBackendMemory
+		if ss.Backend != nil {
+			backend = *ss.Backend
+		}
+		if backend == networkingv1alpha1.SessionStickyBackendRedis {
+			if ss.Redis == nil || ss.Redis.Address == "" {
+				allErrs = append(allErrs, field.Required(specField.Child("sessionSticky").Child("redis"), "redis.address is required when backend is Redis"))
+			}
+		}
+		if ss.SessionAffinitySeconds != nil && *ss.SessionAffinitySeconds < 1 {
+			allErrs = append(allErrs, field.Invalid(specField.Child("sessionSticky").Child("sessionAffinitySeconds"), *ss.SessionAffinitySeconds, "must be >= 1"))
+		}
+	}
+
 	if len(allErrs) > 0 {
 		var messages []string
 		for _, err := range allErrs {

@@ -41,6 +41,10 @@ type KthenaConfig struct {
 	InferenceExtensionEnabled bool
 	ImageTag                  string
 	ChartPath                 string
+	// HelmPostRendererPath is an optional path to a Helm post-renderer executable (reads rendered YAML on stdin, writes to stdout).
+	HelmPostRendererPath string
+	// HelmPostRendererEnv is merged into the environment of the helm install command (e.g. paths for the post-renderer).
+	HelmPostRendererEnv map[string]string
 }
 
 // NewDefaultConfig returns a default configuration for kthena installation
@@ -84,7 +88,19 @@ func InstallKthena(cfg *KthenaConfig) error {
 		"--set", fmt.Sprintf("workload.controllerManager.runtimeImage.tag=%s", cfg.ImageTag),
 	}
 
+	if cfg.HelmPostRendererPath != "" {
+		abs, err := filepath.Abs(cfg.HelmPostRendererPath)
+		if err != nil {
+			return fmt.Errorf("helm post-renderer path: %w", err)
+		}
+		args = append(args, "--post-renderer", abs)
+	}
+
 	cmd := exec.Command("helm", args...)
+	cmd.Env = os.Environ()
+	for k, v := range cfg.HelmPostRendererEnv {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	fmt.Printf("Installing kthena: %s\n", strings.Join(cmd.Args, " "))

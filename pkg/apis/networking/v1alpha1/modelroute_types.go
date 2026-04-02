@@ -53,6 +53,69 @@ type ModelRouteSpec struct {
 	// There is no limitation if this field is not set.
 	// +optional
 	RateLimit *RateLimit `json:"rateLimit,omitempty"`
+
+	// SessionSticky configures session affinity so requests with the same session key
+	// are routed to the same model server Pod (aggregated mode only; ignored for PD disaggregation).
+	// +optional
+	SessionSticky *SessionSticky `json:"sessionSticky,omitempty"`
+}
+
+// SessionSticky configures gateway-side session-to-Pod affinity.
+type SessionSticky struct {
+	// Enabled turns on session sticky routing for this ModelRoute.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// SessionAffinitySeconds is the TTL for the session-to-pod binding.
+	// Defaults to 10800 (3 hours) when unset.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	SessionAffinitySeconds *int32 `json:"sessionAffinitySeconds,omitempty"`
+
+	// Backend selects where session mappings are stored.
+	// Defaults to Memory when unset.
+	// +optional
+	// +kubebuilder:validation:Enum=Memory;Redis
+	Backend *SessionStickyBackend `json:"backend,omitempty"`
+
+	// Redis is required when Backend is Redis.
+	// +optional
+	Redis *RedisConfig `json:"redis,omitempty"`
+
+	// Sources lists session key extractors in order; the first non-empty value wins.
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	Sources []SessionKeySource `json:"sources,omitempty"`
+}
+
+// SessionStickyBackend is the backing store for session mappings.
+// +kubebuilder:validation:Enum=Memory;Redis
+type SessionStickyBackend string
+
+const (
+	SessionStickyBackendMemory SessionStickyBackend = "Memory"
+	SessionStickyBackendRedis  SessionStickyBackend = "Redis"
+)
+
+// SessionKeySourceType identifies how a session key is extracted from a request.
+// +kubebuilder:validation:Enum=Header;Query;Cookie;JWTClaim
+type SessionKeySourceType string
+
+const (
+	SessionKeySourceHeader   SessionKeySourceType = "Header"
+	SessionKeySourceQuery    SessionKeySourceType = "Query"
+	SessionKeySourceCookie   SessionKeySourceType = "Cookie"
+	SessionKeySourceJWTClaim SessionKeySourceType = "JWTClaim"
+)
+
+// SessionKeySource defines one session key extraction rule.
+type SessionKeySource struct {
+	// Type of extraction.
+	// +kubebuilder:validation:Required
+	Type SessionKeySourceType `json:"type"`
+	// Name is the HTTP header name, query parameter name, cookie name, or JWT claim name.
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
 }
 
 type Rule struct {
