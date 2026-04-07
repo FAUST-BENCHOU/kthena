@@ -40,7 +40,10 @@ import (
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
 
-const nginxImage = "nginx:1.28.2"
+const (
+	nginxImage       = "nginx:1.28.2"
+	nginxAlpineImage = "nginx:alpine"
+)
 
 // TestModelServingLifecycle verifies the full lifecycle of a ModelServing resource:
 // Create -> Verify Ready -> Update (change image) -> Verify Updated -> Delete -> Verify Deleted.
@@ -70,9 +73,9 @@ func TestModelServingLifecycle(t *testing.T) {
 	require.NoError(t, err, "Failed to get ModelServing for update")
 
 	updatedMS := currentMS.DeepCopy()
-	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "nginx:alpine"
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
 
-	t.Log("Phase 2: Updating ModelServing (changing image to nginx:alpine)")
+	t.Logf("Phase 2: Updating ModelServing (changing image to %s)", nginxAlpineImage)
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
 	require.NoError(t, err, "Failed to update ModelServing")
 
@@ -96,7 +99,7 @@ func TestModelServingLifecycle(t *testing.T) {
 			}
 			hasUpdatedImage := false
 			for _, container := range pod.Spec.Containers {
-				if container.Name == "test-container" && container.Image == "nginx:alpine" {
+				if container.Name == "test-container" && container.Image == nginxAlpineImage {
 					hasUpdatedImage = true
 					break
 				}
@@ -106,7 +109,7 @@ func TestModelServingLifecycle(t *testing.T) {
 			}
 		}
 		return true
-	}, 3*time.Minute, 5*time.Second, "Not all pods were updated to nginx:alpine")
+	}, 3*time.Minute, 5*time.Second, fmt.Sprintf("Not all pods were updated to %s", nginxAlpineImage))
 	t.Log("Phase 2 passed: ModelServing updated successfully")
 
 	// Phase 3: Delete
@@ -772,7 +775,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	// Update the ModelServing to trigger a rolling update (change image)
 	updatedMS := initialMS.DeepCopy()
 	// Modify the container image to trigger a rolling update
-	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "nginx:alpine"
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
 
 	t.Log("Updating ModelServing to trigger rolling update with maxUnavailable=2")
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
@@ -831,7 +834,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get final ModelServing")
 	assert.Equal(t, int32(4), *finalMS.Spec.Replicas, "Final ModelServing should have 4 replicas in spec")
-	assert.Equal(t, "nginx:alpine", finalMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image, "Final ModelServing should have updated image")
+	assert.Equal(t, nginxAlpineImage, finalMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image, "Final ModelServing should have updated image")
 
 	// Verify that maxUnavailable was never exceeded during the update
 	assert.True(t, maxObservedUnavailable <= 2, "Max unavailable replicas (%d) exceeded maxUnavailable limit (2)", maxObservedUnavailable)
