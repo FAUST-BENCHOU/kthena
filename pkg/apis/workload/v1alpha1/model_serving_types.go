@@ -59,7 +59,7 @@ type ModelServingSpec struct {
 	RolloutStrategy *RolloutStrategy `json:"rolloutStrategy,omitempty"`
 
 	// RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt
-	// +kubebuilder:default=ServingGroupRecreate
+	// +kubebuilder:default=RoleRecreate
 	// +kubebuilder:validation:Enum={ServingGroupRecreate,RoleRecreate,None}
 	// +optional
 	RecoveryPolicy RecoveryPolicy `json:"recoveryPolicy,omitempty"`
@@ -147,9 +147,8 @@ type RolloutStrategy struct {
 }
 
 // RolloutStrategyType defines the strategy to use to update replicas.
-// It must correspond to the granularity of the RecoveryPolicy.
-// `ServingGroupRollingUpdate` corresponds to `ServingGroupRecreate`
-// `RoleRollingUpdate` corresponds to `RoleRecreate`
+// Note that if `recoveryPolicy` is set to `ServingGroupRecreate` and `rolloutStrategyType` is set to `RoleRollingUpdate`,
+// the entire servingGroup will be deleted during a rolling update because the outdated role is removed.
 type RolloutStrategyType string
 
 const (

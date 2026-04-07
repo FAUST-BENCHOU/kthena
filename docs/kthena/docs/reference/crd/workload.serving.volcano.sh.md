@@ -507,7 +507,7 @@ _Appears in:_
 | `plugins` _[PluginSpec](#pluginspec) array_ | Plugins defines optional plugin chain to customize serving pods. |  |  |
 | `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
-| `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | ServingGroupRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
+| `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
 
 
 #### ModelServingStatus
@@ -779,9 +779,8 @@ _Appears in:_
 _Underlying type:_ _string_
 
 RolloutStrategyType defines the strategy to use to update replicas.
-It must correspond to the granularity of the RecoveryPolicy.
-`ServingGroupRollingUpdate` corresponds to `ServingGroupRecreate`
-`RoleRollingUpdate` corresponds to `RoleRecreate`
+Note that if `recoveryPolicy` is set to `servingGroupRecreate` and `rolloutStrategyType` is set to `roleRollingUpdate`,
+the entire servingGroup will be deleted during a rolling update because the outdated role is removed.
 
 
 

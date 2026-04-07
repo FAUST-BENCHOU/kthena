@@ -346,10 +346,12 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 	default:
 		klog.V(4).Infof("handleDefault: %s/%s", newPod.Namespace, newPod.Name)
 		if !c.initialSync {
+			roleName := utils.GetRoleName(newPod)
+			roleTemplateHash := c.resolveRoleTemplateHash(ms, roleName, newPod)
 			c.store.AddServingGroupAndRole(types.NamespacedName{
 				Namespace: ms.Namespace,
 				Name:      ms.Name,
-			}, servingGroupName, utils.ObjectRevision(newPod), utils.ObjectRoleTemplateHash(newPod), utils.GetRoleName(newPod), utils.GetRoleID(newPod))
+			}, servingGroupName, utils.ObjectRevision(newPod), roleTemplateHash, roleName, utils.GetRoleID(newPod))
 		}
 	}
 }
@@ -895,11 +897,12 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 	}
 
 	klog.V(2).Infof("scaling up role %s in ServingGroup %s: creating %d new replicas", targetRole.Name, groupName, toCreate)
+	roleTemplateHash := utils.CalRoleTemplateHash(targetRole)
 	// Create new Roles with increasing indices
 	for i := 0; i < toCreate; i++ {
 		newIndex := startingIndex + i
 		// Create pods for role
-		roleTemplateHash, err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, newIndex, servingGroupOrdinal, newRevision)
+		err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, newIndex, servingGroupOrdinal, newRevision, roleTemplateHash)
 		if err != nil {
 			klog.Errorf("create role %s for ServingGroup %s failed: %v", utils.GenerateRoleID(targetRole.Name, newIndex), groupName, err)
 		} else {
@@ -950,7 +953,7 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 		if len(pods) < expectedPods {
 			klog.V(2).Infof("manageRoleReplicas: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
-			if _, err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, roleIndex, servingGroupOrdinal, newRevision); err != nil {
+			if err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, roleIndex, servingGroupOrdinal, newRevision); err != nil {
 				klog.Errorf("manageRoleReplicas: failed to recreate pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
 			}
 		}
@@ -1110,7 +1113,7 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 	}
 
 	// Delete outdated groups respecting the maxUnavailable constraint
-	updateCount, err := c.deleteOutdatedServingGroups(ctx, ms, maxScaleDown, notRunningOutdatedGroups, runningOutdatedGroups, revision)
+	updateCount, err := c.deleteOutdatedResourcesForRollingUpdate(ctx, ms, maxScaleDown, notRunningOutdatedGroups, runningOutdatedGroups, revision)
 	if err != nil {
 		return err
 	}
@@ -1121,9 +1124,9 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 	return nil
 }
 
-// deleteOutdatedServingGroups deletes outdated ServingGroups respecting partition and maxScaleDown constraints
-// It prioritizes deleting not-running outdated groups first, then running outdated groups
-func (c *ModelServingController) deleteOutdatedServingGroups(
+// deleteOutdatedResourcesForRollingUpdate deletes outdated resources during rolling update
+// respecting maxScaleDown constraints.
+func (c *ModelServingController) deleteOutdatedResourcesForRollingUpdate(
 	ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
 	maxScaleDown int,
@@ -1131,57 +1134,78 @@ func (c *ModelServingController) deleteOutdatedServingGroups(
 	runningOutdatedGroups []datastore.ServingGroup,
 	revision string,
 ) (int, error) {
-	updateCount := 0
-
-	// Combine all outdated groups
+	// Combine all outdated groups.
 	// Delete in descending order by sequence number. Prioritise deletion of servingGroups in notRunning status.
 	// Therefore, servingGroups in notRunning status should be placed at the end.
 	allOutdatedGroups := append(runningOutdatedGroups, notRunningOutdatedGroups...)
 
-	// Find outdated roles in all serving groups
+	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate {
+		return c.deleteOutdatedServingGroupsForServingGroupRollingUpdate(ctx, ms, maxScaleDown, allOutdatedGroups)
+	}
+
+	return c.deleteOutdatedRolesForRoleRollingUpdate(ctx, ms, maxScaleDown, allOutdatedGroups, revision)
+}
+
+// deleteOutdatedServingGroupsForServingGroupRollingUpdate deletes outdated ServingGroups
+// for `ServingGroupRollingUpdate`.
+func (c *ModelServingController) deleteOutdatedServingGroupsForServingGroupRollingUpdate(
+	ctx context.Context,
+	ms *workloadv1alpha1.ModelServing,
+	maxScaleDown int,
+	allOutdatedGroups []datastore.ServingGroup,
+) (int, error) {
+	updateCount := 0
+
+	// Iterate from end to start to delete largest ordinals first.
+	for i := len(allOutdatedGroups) - 1; i >= 0 && updateCount < maxScaleDown; i-- {
+		sg := allOutdatedGroups[i]
+		klog.V(2).Infof("ServingGroup %s will be terminated for update (status=%s)", sg.Name, sg.Status)
+		if err := c.deleteServingGroup(ctx, ms, sg.Name); err != nil {
+			return updateCount, err
+		}
+		updateCount++
+	}
+
+	return updateCount, nil
+}
+
+// deleteOutdatedRolesForRoleRollingUpdate deletes outdated Roles for `RoleRollingUpdate`.
+func (c *ModelServingController) deleteOutdatedRolesForRoleRollingUpdate(
+	ctx context.Context,
+	ms *workloadv1alpha1.ModelServing,
+	maxScaleDown int,
+	allOutdatedGroups []datastore.ServingGroup,
+	revision string,
+) (int, error) {
+	updateCount := 0
+
+	// Find outdated roles in all serving groups.
 	outdatedRolesMap := c.findOutdatedRolesInServingGroups(ms, allOutdatedGroups, revision)
 
-	deleteGroups := func(groups []datastore.ServingGroup) error {
-		// Iterate from end to start to delete largest ordinals first
-		for i := len(groups) - 1; i >= 0 && updateCount < maxScaleDown; i-- {
-			sg := groups[i]
-			if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate {
-				klog.V(2).Infof("ServingGroup %s will be terminated for update (status=%s)", sg.Name, sg.Status)
-				if err := c.deleteServingGroup(ctx, ms, sg.Name); err != nil {
-					return err
+	// Iterate from end to start to delete largest ordinals first.
+	for i := len(allOutdatedGroups) - 1; i >= 0 && updateCount < maxScaleDown; i-- {
+		sg := allOutdatedGroups[i]
+		outdatedRoleNames, exists := outdatedRolesMap[sg.Name]
+		hasDeletedRoles := false
+		if exists && len(outdatedRoleNames) > 0 {
+			for _, roleName := range outdatedRoleNames {
+				outdatedRoles, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, roleName)
+				if err != nil {
+					klog.Errorf("failed to get roles for ServingGroup %s, role %s: %v", sg.Name, roleName, err)
+					continue
 				}
-				updateCount++
-			} else {
-				// default is role rolling update, delete outdated roles in the ServingGroup for update
-				outdatedRoleNames, exists := outdatedRolesMap[sg.Name]
-				hasDeletedRoles := false
-				if exists && len(outdatedRoleNames) > 0 {
-					for _, roleName := range outdatedRoleNames {
-						// outdatedRoles := sg.Roles[roleName]
-						outdatedRoles, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, roleName)
-						if err != nil {
-							klog.Errorf("failed to get roles for ServingGroup %s, role %s: %v", sg.Name, roleName, err)
-							continue
-						}
-						klog.V(2).Infof("Role %s in ServingGroup %s will be terminated for update", roleName, sg.Name)
-						for i := range outdatedRoles {
-							c.DeleteRole(ctx, ms, sg.Name, roleName, outdatedRoles[i].Name)
-							hasDeletedRoles = true
-						}
-					}
-				}
-				// Only increment updateCount if we actually deleted roles
-				if hasDeletedRoles {
-					updateCount++
+				klog.V(2).Infof("Role %s in ServingGroup %s will be terminated for update", roleName, sg.Name)
+				for i := range outdatedRoles {
+					c.DeleteRole(ctx, ms, sg.Name, roleName, outdatedRoles[i].Name)
+					hasDeletedRoles = true
 				}
 			}
 		}
-		return nil
-	}
 
-	// First, process not-running outdated groups (higher priority)
-	if err := deleteGroups(allOutdatedGroups); err != nil {
-		return updateCount, err
+		// Only increment updateCount if we actually deleted roles.
+		if hasDeletedRoles {
+			updateCount++
+		}
 	}
 
 	return updateCount, nil
@@ -1208,10 +1232,12 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	// Add the running pod to the global storage and try to update the ServingGroup status
 	roleName := utils.GetRoleName(newPod)
 	roleID := utils.GetRoleID(newPod)
+	roleTemplateHash := c.resolveRoleTemplateHash(ms, roleName, newPod)
+
 	c.store.AddRunningPodToServingGroup(types.NamespacedName{
 		Namespace: ms.Namespace,
 		Name:      ms.Name,
-	}, servingGroupName, newPod.Name, utils.ObjectRevision(newPod), utils.ObjectRoleTemplateHash(newPod), roleName, roleID)
+	}, servingGroupName, newPod.Name, utils.ObjectRevision(newPod), roleTemplateHash, roleName, roleID)
 
 	// Check and update role status to Running when all pods in the role are ready
 	roleReady, err := c.checkRoleReady(ms, servingGroupName, roleName, roleID)
@@ -1248,6 +1274,29 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 		klog.V(4).Infof("ServingGroup %s still creating", servingGroupName)
 	}
 	return nil
+}
+
+// resolveRoleTemplateHash resolves role template hash from pod labels first.
+// For backward compatibility with legacy pods that do not carry
+// workloadv1alpha1.RoleTemplateHashLabelKey, it falls back to calculating
+// the hash from the matching role in ModelServing spec.
+func (c *ModelServingController) resolveRoleTemplateHash(ms *workloadv1alpha1.ModelServing, roleName string, obj metav1.Object) string {
+	roleTemplateHash := utils.ObjectRoleTemplateHash(obj)
+	if roleTemplateHash != "" {
+		return roleTemplateHash
+	}
+
+	for _, role := range ms.Spec.Template.Roles {
+		if role.Name != roleName {
+			continue
+		}
+		fallbackHash := utils.CalRoleTemplateHash(role)
+		klog.V(4).Infof("roleTemplateHash label missing on object %s/%s, fallback to calculated hash for role %s", obj.GetNamespace(), obj.GetName(), roleName)
+		return fallbackHash
+	}
+
+	klog.Warningf("roleTemplateHash label missing on object %s/%s and role %s not found in ModelServing %s/%s spec", obj.GetNamespace(), obj.GetName(), roleName, ms.Namespace, ms.Name)
+	return ""
 }
 
 func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, errPod *corev1.Pod) error {
@@ -2000,9 +2049,10 @@ func (c *ModelServingController) buildPluginChain(ms *workloadv1alpha1.ModelServ
 func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupIndex int, revision string, roles []workloadv1alpha1.Role) error {
 	servingGroupName := utils.GenerateServingGroupName(ms.Name, servingGroupIndex)
 	for _, role := range roles {
+		roleTemplateHash := utils.CalRoleTemplateHash(role)
 		replicas := int(*role.Replicas)
 		for i := 0; i < replicas; i++ {
-			roleTemplateHash, err := c.CreatePodsByRole(ctx, *role.DeepCopy(), ms, i, servingGroupIndex, revision)
+			err := c.CreatePodsByRole(ctx, *role.DeepCopy(), ms, i, servingGroupIndex, revision, roleTemplateHash)
 			if err != nil {
 				return err
 			}
@@ -2016,23 +2066,29 @@ func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, 
 	return nil
 }
 
-func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, roleIndex int, servingGroupOrdinal int, revision string) (string, error) {
+func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, roleIndex int, servingGroupOrdinal int, revision string, roleTemplateHashOptional ...string) error {
 	servingGroupName := utils.GenerateServingGroupName(ms.Name, servingGroupOrdinal)
 	// TODO(hzxuzhonghu): build the plugin chain only once per ModelServing
 	// This is not critical now, so we leave it for future optimization.
 	chain, err := c.buildPluginChain(ms)
 	if err != nil {
-		return "", fmt.Errorf("build plugin chain: %w", err)
+		return fmt.Errorf("build plugin chain: %w", err)
 	}
 	roleID := utils.GenerateRoleID(role.Name, roleIndex)
-	copy := utils.RemoveRoleReplicasForRoleTemplateHash(role)
-	roleTemplateHash := utils.Revision(copy)
+	roleTemplateHash := ""
+
+	// If roleTemplateHash is provided, use it directly; otherwise calculate it from the role spec
+	if len(roleTemplateHashOptional) > 0 && roleTemplateHashOptional[0] != "" {
+		roleTemplateHash = roleTemplateHashOptional[0]
+	} else {
+		roleTemplateHash = utils.CalRoleTemplateHash(role)
+	}
 
 	entryPod := utils.GenerateEntryPod(role, ms, servingGroupName, roleIndex, revision, roleTemplateHash)
 	taskName := c.podGroupManager.GenerateTaskName(role.Name, roleIndex)
 	c.podGroupManager.AnnotatePodWithPodGroup(entryPod, ms, servingGroupName, taskName)
 	if err := c.createPod(ctx, ms, servingGroupName, role.Name, roleID, entryPod, true, chain, "entry"); err != nil {
-		return roleTemplateHash, err
+		return err
 	}
 	if role.WorkerReplicas > 0 && role.WorkerTemplate == nil {
 		klog.Errorf("WorkerTemplate is required when workerReplicas > 0 for role %s. This should have been caught by webhook validation.", role.Name)
@@ -2043,10 +2099,10 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 		workerPod := utils.GenerateWorkerPod(role, ms, entryPod, servingGroupName, roleIndex, i, revision, roleTemplateHash)
 		c.podGroupManager.AnnotatePodWithPodGroup(workerPod, ms, servingGroupName, taskName)
 		if err := c.createPod(ctx, ms, servingGroupName, role.Name, roleID, workerPod, false, chain, "worker"); err != nil {
-			return roleTemplateHash, err
+			return err
 		}
 	}
-	return roleTemplateHash, nil
+	return nil
 }
 
 func (c *ModelServingController) createPod(
@@ -2238,7 +2294,7 @@ func (c *ModelServingController) findOutdatedRolesInServingGroups(ms *workloadv1
 
 		// Additionally, check for roles that exist in the store but are not in the new spec
 		// These roles should also be considered "outdated" and need to be deleted
-		allRoles, err := c.store.GetAllRoles(utils.GetNamespaceName(ms), sg.Name)
+		allRoles, err := c.store.GetRolesByGroup(utils.GetNamespaceName(ms), sg.Name)
 		if err != nil {
 			klog.Errorf("failed to get all roles for ServingGroup %s: %v", sg.Name, err)
 			continue

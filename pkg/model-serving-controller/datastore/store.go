@@ -35,17 +35,17 @@ type Store interface {
 	GetRunningPodNumByServingGroup(modelServingName types.NamespacedName, groupName string) (int, error)
 	GetServingGroupStatus(modelServingName types.NamespacedName, groupName string) ServingGroupStatus
 	GetRoleList(modelServingName types.NamespacedName, groupName, roleName string) ([]Role, error)
-	GetAllRoles(modelServingName types.NamespacedName, groupName string) (map[string]map[string]*Role, error)
+	GetRolesByGroup(modelServingName types.NamespacedName, groupName string) (map[string]map[string]*Role, error)
 	GetRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string) RoleStatus
 	UpdateRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string, status RoleStatus) error
 	DeleteRole(modelServingName types.NamespacedName, groupName, roleName, roleID string)
 	DeleteModelServing(modelServingName types.NamespacedName)
 	DeleteServingGroup(modelServingName types.NamespacedName, groupName string)
 	AddServingGroup(modelServingName types.NamespacedName, idx int, revision string)
-	AddRole(modelServingName types.NamespacedName, groupName, roleName, roleID, revision, roleRevision string)
-	AddRunningPodToServingGroup(modelServingName types.NamespacedName, groupName, pod, revision, roleRevision, roleName, roleID string)
+	AddRole(modelServingName types.NamespacedName, groupName, roleName, roleID, revision, roleTemplateHash string)
+	AddRunningPodToServingGroup(modelServingName types.NamespacedName, groupName, pod, revision, roleTemplateHash, roleName, roleID string)
 	// AddServingGroupAndRole adds servingGroup and role if not exist
-	AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleRevision, roleName, roleID string)
+	AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleTemplateHash, roleName, roleID string)
 	DeleteRunningPodFromServingGroup(modelServingName types.NamespacedName, groupName string, pod string)
 	UpdateServingGroupStatus(modelServingName types.NamespacedName, groupName string, Status ServingGroupStatus) error
 	UpdateServingGroupRevision(modelServingName types.NamespacedName, groupName string, revision string) error
@@ -159,7 +159,7 @@ func (s *store) GetRoleList(modelServingName types.NamespacedName, groupName, ro
 	return roleSlice, nil
 }
 
-func (s *store) GetAllRoles(modelServingName types.NamespacedName, groupName string) (map[string]map[string]*Role, error) {
+func (s *store) GetRolesByGroup(modelServingName types.NamespacedName, groupName string) (map[string]map[string]*Role, error) {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	servingGroups, ok := s.servingGroup[modelServingName]

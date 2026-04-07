@@ -376,14 +376,13 @@ func validateImageField(image string) error {
 func validateRecoveryPolicyAndRolloutStrategy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	var allErrs field.ErrorList
 	// Effective defaults:
-	// - recoveryPolicy: ServingGroupRecreate
+	// - recoveryPolicy: RoleRecreate
 	// - rolloutStrategy.type: ServingGroupRollingUpdate
-	// Required one-to-one mapping:
-	// - ServingGroupRecreate <-> ServingGroupRollingUpdate
-	// - RoleRecreate         <-> RoleRollingUpdate
+	// Required one-to-one mapping not be:
+	// - ServingGroupRecreate <-> roleRollingUpdate
 	effectiveRecoveryPolicy := ms.Spec.RecoveryPolicy
 	if effectiveRecoveryPolicy == "" {
-		effectiveRecoveryPolicy = workloadv1alpha1.ServingGroupRecreate
+		effectiveRecoveryPolicy = workloadv1alpha1.RoleRecreate
 	}
 
 	effectiveRolloutType := workloadv1alpha1.ServingGroupRollingUpdate
@@ -394,10 +393,9 @@ func validateRecoveryPolicyAndRolloutStrategy(ms *workloadv1alpha1.ModelServing)
 		}
 	}
 
-	matched := (effectiveRecoveryPolicy == workloadv1alpha1.ServingGroupRecreate && effectiveRolloutType == workloadv1alpha1.ServingGroupRollingUpdate) ||
-		(effectiveRecoveryPolicy == workloadv1alpha1.RoleRecreate && effectiveRolloutType == workloadv1alpha1.RoleRollingUpdate)
+	unMatched := (effectiveRecoveryPolicy == workloadv1alpha1.ServingGroupRecreate && effectiveRolloutType == workloadv1alpha1.RoleRollingUpdate)
 
-	if !matched {
+	if unMatched {
 		// Point to the explicitly specified field when possible.
 		errPath := field.NewPath("spec").Child("rolloutStrategy").Child("type")
 		errValue := any(effectiveRolloutType)

@@ -86,7 +86,7 @@ spec:
                   type: object
                 type: array
               recoveryPolicy:
-                default: ServingGroupRecreate
+                default: RoleRecreate
                 description: RecoveryPolicy defines the recovery policy for the failed
                   Pod to be rebuilt
                 enum:

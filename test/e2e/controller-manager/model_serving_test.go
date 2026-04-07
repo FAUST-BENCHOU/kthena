@@ -1524,7 +1524,7 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 		}
 
 		return true
-	}, 2*time.Minute, 10*time.Second)
+	}, 2*time.Minute, 1*time.Second)
 
 	t.Log("ModelServing role-based rolling update test passed successfully")
 }

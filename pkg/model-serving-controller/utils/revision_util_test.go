@@ -93,7 +93,7 @@ func TestDeepHashObject(t *testing.T) {
 	}
 }
 
-func TestRemoveRoleReplicasForRoleRevision(t *testing.T) {
+func TestRemoveRoleReplicasForRoleTemplateHash(t *testing.T) {
 	replicas1 := int32(3)
 	replicas2 := int32(5)
 

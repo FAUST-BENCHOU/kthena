@@ -6162,6 +6162,75 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 	}
 }
 
+func TestResolveRoleTemplateHash(t *testing.T) {
+	controller := &ModelServingController{}
+	roleName := "prefill"
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-ms",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:           roleName,
+						Replicas:       ptr.To[int32](1),
+						WorkerReplicas: 1,
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "nginx:latest"}},
+							},
+						},
+						WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "worker", Image: "busybox:latest"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Run("use label value when present", func(t *testing.T) {
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-pod-1",
+			Labels: map[string]string{
+				workloadv1alpha1.RoleTemplateHashLabelKey: "hash-from-label",
+			},
+		}}
+
+		got := controller.resolveRoleTemplateHash(ms, roleName, pod)
+		assert.Equal(t, "hash-from-label", got)
+	})
+
+	t.Run("fallback to calculated hash when label missing", func(t *testing.T) {
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-pod-2",
+			Labels:    map[string]string{},
+		}}
+
+		expected := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
+		got := controller.resolveRoleTemplateHash(ms, roleName, pod)
+		assert.Equal(t, expected, got)
+	})
+
+	t.Run("return empty when role not found in spec", func(t *testing.T) {
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-pod-3",
+			Labels:    map[string]string{},
+		}}
+
+		got := controller.resolveRoleTemplateHash(ms, "decode", pod)
+		assert.Equal(t, "", got)
+	})
+}
+
 func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 	tests := []struct {
 		name                  string
@@ -6423,7 +6492,7 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 				)
 			}
 
-			result, err := controller.deleteOutdatedServingGroups(
+			result, err := controller.deleteOutdatedResourcesForRollingUpdate(
 				context.Background(),
 				ms,
 				tt.maxScaleDown,
