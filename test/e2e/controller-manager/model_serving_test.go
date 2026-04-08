@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	servingctrlutils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
 
@@ -765,6 +767,51 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	t.Log("ModelServing rolling update maxUnavailable test passed successfully")
 }
 
+// TestModelServingServingGroupOrdinalNoUnboundedIndexAfterScaleDownUp asserts that a plain spec.replicas
+// scale down then scale up never assigns ServingGroup ordinals beyond [0, replicas): index must not grow
+// without bound (e.g. ordinal >= replicas on pod group-name labels). We only care about that regression;
+// whether ordinals are contiguous is out of scope here.
+func TestModelServingServingGroupOrdinalNoUnboundedIndexAfterScaleDownUp(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	replicas := int32(5)
+	msName := "test-sg-ordinal-scale-only"
+	modelServing := createBasicModelServing(msName, replicas, 0)
+	t.Logf("Creating ModelServing %s with %d replicas", msName, replicas)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, msName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	small := int32(2)
+	msDown := ms.DeepCopy()
+	msDown.Spec.Replicas = &small
+	t.Log("Scaling down to 2 ServingGroups")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, msDown, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, msName)
+
+	msUp, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, msName, metav1.GetOptions{})
+	require.NoError(t, err)
+	msUp.Spec.Replicas = &replicas
+	stopScaleUpPoll, sawOrdinalOutOfRange, ordinalDetail := startServingGroupOrdinalOutOfRangePoll(ctx, kubeClient, msName, int(replicas))
+	t.Log("Scaling back up to 5 ServingGroups (polling for ordinal >= replicas)")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, msUp, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, msName)
+	stopScaleUpPoll()
+
+	if sawOrdinalOutOfRange.Load() {
+		d, _ := ordinalDetail.Load().(string)
+		require.Fail(t, "observed ServingGroup ordinal >= replicas during scale-up (unbounded index growth)", "detail: %s", d)
+	}
+
+	outOfRange, detail := podsHaveServingGroupOrdinalOutOfRange(ctx, kubeClient, msName, int(replicas))
+	require.False(t, outOfRange, "after scale down/up, no pod should have ordinal >= replicas: %s", detail)
+
+	t.Log("ServingGroup ordinal in-range check passed after scale down/up")
+}
+
 // TestModelServingRoleStatusEvents verifies that role status transitions are surfaced via Kubernetes Events.
 func TestModelServingRoleStatusEvents(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
@@ -855,6 +902,61 @@ func waitForRunningPodCount(t *testing.T, ctx context.Context, kubeClient *kuber
 		t.Logf("Running pod count: %d (expecting %d)", runningCount, expected)
 		return runningCount == expected
 	}, timeout, 5*time.Second, "Expected %d running pods for ModelServing %s", expected, msName)
+}
+
+// startServingGroupOrdinalOutOfRangePoll runs podsHaveServingGroupOrdinalOutOfRange on a ticker until stop
+// is called. If any pod ever has ordinal >= replicas, saw is set and detail holds the first explanation.
+func startServingGroupOrdinalOutOfRangePoll(parentCtx context.Context, kubeClient *kubernetes.Clientset, msName string, replicas int) (stop context.CancelFunc, saw *atomic.Bool, detail *atomic.Value) {
+	pollCtx, cancel := context.WithCancel(parentCtx)
+	var sawOrd atomic.Bool
+	var firstDetail atomic.Value // string
+	go func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pollCtx.Done():
+				return
+			case <-ticker.C:
+				bad, d := podsHaveServingGroupOrdinalOutOfRange(pollCtx, kubeClient, msName, replicas)
+				if bad {
+					sawOrd.Store(true)
+					if firstDetail.Load() == nil {
+						firstDetail.Store(d)
+					}
+				}
+			}
+		}
+	}()
+	return cancel, &sawOrd, &firstDetail
+}
+
+// podsHaveServingGroupOrdinalOutOfRange returns true if any non-deleting pod for this ModelServing has a
+// group-name label whose ordinal is outside [0, replicas) (parent must match msName).
+func podsHaveServingGroupOrdinalOutOfRange(ctx context.Context, kubeClient *kubernetes.Clientset, msName string, replicas int) (bool, string) {
+	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: modelServingLabelSelector(msName),
+	})
+	if err != nil {
+		return false, ""
+	}
+	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		gn, ok := pod.Labels[workload.GroupNameLabelKey]
+		if !ok || gn == "" {
+			continue
+		}
+		parent, ord := servingctrlutils.GetParentNameAndOrdinal(gn)
+		if parent != msName || ord < 0 {
+			continue
+		}
+		if ord >= replicas {
+			return true, fmt.Sprintf("pod %s group-name=%s (ordinal %d >= replicas %d)", pod.Name, gn, ord, replicas)
+		}
+	}
+	return false, ""
 }
 
 // createRole is a helper function to create a Role with specified replicas and workers
