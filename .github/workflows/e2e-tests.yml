@@ -22,7 +22,8 @@ jobs:
   e2e-tests:
     name: E2E (${{ matrix.category }})
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Router / gateway-api jobs also run session-sticky suites (extra Helm install + scaling).
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
