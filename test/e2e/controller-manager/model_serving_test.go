@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -827,14 +829,41 @@ func TestModelServingServingGroupOrdinalNoUnboundedIndexDuringRollingUpdate(t *t
 
 	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(replicas), 3*time.Minute)
 
-	var lastDenseDetail string
-	require.Eventually(t, func() bool {
+	deadline := time.Now().Add(2 * time.Minute)
+	var lastDetail string
+	for time.Now().Before(deadline) {
 		ok, detail := servingGroupOrdinalsDenseZeroToNMinusOne(ctx, kubeClient, msName, int(replicas))
-		lastDenseDetail = detail
-		return ok
-	}, 2*time.Minute, 3*time.Second, "after rollout, ServingGroup ordinals should be dense 0..%d: %s", replicas-1, lastDenseDetail)
+		if ok {
+			t.Log("ServingGroup ordinals dense 0..N-1 check passed after rolling update (no partition)")
+			return
+		}
+		lastDetail = detail
+		t.Logf("ServingGroup ordinal dense (retry): %s\n%s", detail, servingGroupOrdinalPodSnapshotForDebug(ctx, kubeClient, msName))
+		time.Sleep(3 * time.Second)
+	}
+	require.Fail(t, "ServingGroup ordinals not dense 0..N-1 after rollout",
+		"last=%s\n\n%s", lastDetail, servingGroupOrdinalPodSnapshotForDebug(ctx, kubeClient, msName))
+}
 
-	t.Log("ServingGroup ordinals dense 0..N-1 check passed after rolling update (no partition)")
+// servingGroupOrdinalPodSnapshotForDebug lists every pod for the ModelServing with phase, group-name label,
+// and parsed parent/ordinal so CI failures show actual indices without relying on t.Log visibility.
+func servingGroupOrdinalPodSnapshotForDebug(ctx context.Context, kubeClient *kubernetes.Clientset, msName string) string {
+	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: modelServingLabelSelector(msName),
+	})
+	if err != nil {
+		return fmt.Sprintf("list pods: %v", err)
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("pod list (%d items) for ms=%q:\n", len(pods.Items), msName))
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		gn := p.Labels[workload.GroupNameLabelKey]
+		parent, ord := servingctrlutils.GetParentNameAndOrdinal(gn)
+		b.WriteString(fmt.Sprintf("  - name=%s phase=%s deleting=%v group-name=%q -> parent=%q ordinal=%d (parent==msName=%v)\n",
+			p.Name, p.Status.Phase, p.DeletionTimestamp != nil, gn, parent, ord, parent == msName))
+	}
+	return b.String()
 }
 
 // TestModelServingRoleStatusEvents verifies that role status transitions are surfaced via Kubernetes Events.
@@ -939,32 +968,48 @@ func servingGroupOrdinalsDenseZeroToNMinusOne(ctx context.Context, kubeClient *k
 		return false, fmt.Sprintf("list pods: %v", err)
 	}
 	ordSet := make(map[int]struct{})
+	var runningNoTerm int
+	var noGroupName, parentMismatch int
 	for _, pod := range pods.Items {
 		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
+		runningNoTerm++
 		gn, ok := pod.Labels[workload.GroupNameLabelKey]
 		if !ok || gn == "" {
+			noGroupName++
 			continue
 		}
 		parent, ord := servingctrlutils.GetParentNameAndOrdinal(gn)
 		if parent != msName || ord < 0 {
+			parentMismatch++
 			continue
 		}
 		if ord >= replicas {
-			return false, fmt.Sprintf("ordinal %d not in [0,%d] (group-name=%s pod %s)", ord, replicas-1, gn, pod.Name)
+			return false, fmt.Sprintf("ordinal %d not in [0,%d] (group-name=%s pod=%s)", ord, replicas-1, gn, pod.Name)
 		}
 		ordSet[ord] = struct{}{}
 	}
+	keys := sortedOrdinalInts(ordSet)
 	if len(ordSet) != replicas {
-		return false, fmt.Sprintf("want %d distinct ordinals in [0,%d], got %d", replicas, replicas-1, len(ordSet))
+		return false, fmt.Sprintf("want %d distinct ordinals in [0,%d], got len=%d keys=%v; runningPods=%d listItems=%d noGroupNameLabel=%d parentOrOrdinalMismatch=%d msName=%q",
+			replicas, replicas-1, len(ordSet), keys, runningNoTerm, len(pods.Items), noGroupName, parentMismatch, msName)
 	}
 	for i := 0; i < replicas; i++ {
 		if _, ok := ordSet[i]; !ok {
-			return false, fmt.Sprintf("missing ordinal %d", i)
+			return false, fmt.Sprintf("missing ordinal %d; have=%v (runningPods=%d)", i, keys, runningNoTerm)
 		}
 	}
 	return true, ""
+}
+
+func sortedOrdinalInts(m map[int]struct{}) []int {
+	s := make([]int, 0, len(m))
+	for k := range m {
+		s = append(s, k)
+	}
+	sort.Ints(s)
+	return s
 }
 
 // createRole is a helper function to create a Role with specified replicas and workers
