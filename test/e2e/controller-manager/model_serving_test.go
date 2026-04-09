@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -38,6 +39,7 @@ import (
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	servingctrlutils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
 
@@ -1250,6 +1252,8 @@ func TestLWSAPIBasic(t *testing.T) {
 }
 
 // TestModelServingPartitionBoundaryProtection verifies partition boundaries during rolling updates.
+// Assertions use verifyPartitionState: ordinals come from group-name labels only — they are not required
+// to be a dense 0..replicas-1 set (e.g. 0,1,2,5,6 is valid).
 func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -1299,6 +1303,8 @@ func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 
 // TestModelServingPartitionDeletedGroupHistoricalRevision verifies deleted groups
 // within partition are rebuilt using historical revision.
+// Same non-dense ordinal model as TestModelServingPartitionBoundaryProtection; the pod to delete is
+// chosen by scanning MS pods (ordinal < partition + historical image), not a fixed index like 1.
 func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -1336,19 +1342,12 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	}, 6*time.Minute, 2*time.Second, "Partition state did not converge")
 	t.Log("Partitioned update established")
 
-	targetOrdinal := 1
-	targetGroupName := fmt.Sprintf("%s-%d", modelServing.Name, targetOrdinal)
+	podToDelete, pickedOrd, targetGroupName, ok := pickRunningPodInPartitionProtectedGroup(ctx, kubeClient, modelServing.Name, partition)
+	require.True(t, ok, "need one Running pod in a partition-protected group (ordinal < partition) on historical image")
 	labelSelector := fmt.Sprintf("modelserving.volcano.sh/group-name=%s", targetGroupName)
 
-	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
-	})
-	require.NoError(t, err)
-	require.NotEmpty(t, pods.Items)
-
-	podToDelete := pods.Items[0]
 	originalUID := podToDelete.UID
-	t.Logf("Deleting pod %s (ordinal %d)", podToDelete.Name, targetOrdinal)
+	t.Logf("Deleting pod %s (ordinal %d group=%s)", podToDelete.Name, pickedOrd, targetGroupName)
 
 	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, podToDelete.Name, metav1.DeleteOptions{})
 	require.NoError(t, err)
@@ -1371,7 +1370,7 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 				continue
 			}
 			for _, container := range pod.Spec.Containers {
-				if container.Image == nginxImage {
+				if e2eImageRefEquivalent(container.Image, nginxImage) {
 					t.Logf("Recreated pod %s uses historical image", pod.Name)
 					return true
 				}
@@ -1386,6 +1385,8 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 }
 
 // TestModelServingRollingUpdate verifies rolling updates without partition.
+// verifyAllPodsHaveImage lists pods by ModelServing name label only; it does not assume ServingGroup
+// ordinals form a dense range.
 func TestModelServingRollingUpdate(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -1472,24 +1473,44 @@ func createPartitionedModelServing(name string, replicas, partition int32) *work
 }
 
 // logPartitionPodInventory prints every ServingGroup's pods (spec + status) for partition debugging.
+// Ordinals are taken from group-name labels (not assumed dense 0..replicas-1): e.g. 0,1,2,5,6 after rollout.
 func logPartitionPodInventory(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, msName string, replicas, partition int32) {
 	t.Helper()
 	t.Logf("--- partition pod inventory ms=%s replicas=%d partition=%d ---", msName, replicas, partition)
-	for ordinal := int32(0); ordinal < replicas; ordinal++ {
-		groupName := fmt.Sprintf("%s-%d", msName, ordinal)
-		labelSelector := fmt.Sprintf("modelserving.volcano.sh/group-name=%s", groupName)
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
-		if err != nil {
-			t.Logf("ordinal=%d group=%s LIST ERROR: %v", ordinal, groupName, err)
-			continue
+	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: modelServingLabelSelector(msName),
+	})
+	if err != nil {
+		t.Logf("LIST ERROR: %v", err)
+		return
+	}
+	byOrd := make(map[int][]*corev1.Pod)
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		gn := p.Labels[workload.GroupNameLabelKey]
+		_, ord := servingctrlutils.GetParentNameAndOrdinal(gn)
+		if ord < 0 {
+			ord = -1
 		}
+		byOrd[ord] = append(byOrd[ord], p)
+	}
+	ords := make([]int, 0, len(byOrd))
+	for k := range byOrd {
+		ords = append(ords, k)
+	}
+	sort.Ints(ords)
+	for _, ord := range ords {
+		groupName := gnForOrdinalLog(msName, ord)
 		zone := "UPDATED"
-		if ordinal < partition {
+		if int32(ord) >= 0 && int32(ord) < partition {
 			zone = "PROTECTED"
 		}
-		t.Logf("ordinal=%d zone=%s group=%s podCount=%d", ordinal, zone, groupName, len(pods.Items))
-		for i := range pods.Items {
-			p := &pods.Items[i]
+		if ord < 0 {
+			zone = "UNKNOWN"
+		}
+		podList := byOrd[ord]
+		t.Logf("ordinal=%d zone=%s group=%s podCount=%d", ord, zone, groupName, len(podList))
+		for i, p := range podList {
 			specImgs := make([]string, 0, len(p.Spec.Containers))
 			for _, c := range p.Spec.Containers {
 				specImgs = append(specImgs, fmt.Sprintf("%s->%s", c.Name, c.Image))
@@ -1507,6 +1528,13 @@ func logPartitionPodInventory(t *testing.T, ctx context.Context, kubeClient *kub
 	t.Logf("--- end partition pod inventory ---")
 }
 
+func gnForOrdinalLog(msName string, ord int) string {
+	if ord < 0 {
+		return "(unparsed)"
+	}
+	return fmt.Sprintf("%s-%d", msName, ord)
+}
+
 func containerStateString(st corev1.ContainerState) string {
 	switch {
 	case st.Running != nil:
@@ -1520,50 +1548,95 @@ func containerStateString(st corev1.ContainerState) string {
 	}
 }
 
+// verifyPartitionState counts ServingGroups by parsed group-name ordinal (not dense 0..replicas-1).
+// Protected: ordinal < partition and running nginx. Updated: ordinal >= partition and running alpine.
+// After rollout, ordinals may look like 0,1,2,5,6 instead of 0,1,2,3,4 (controller scale/rollout behavior).
 func verifyPartitionState(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset,
 	msName string, partition, replicas int32) (protectedCorrect, updatedCorrect int) {
 	t.Helper()
-	for ordinal := int32(0); ordinal < replicas; ordinal++ {
-		groupName := fmt.Sprintf("%s-%d", msName, ordinal)
-		labelSelector := fmt.Sprintf("modelserving.volcano.sh/group-name=%s", groupName)
-
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil || len(pods.Items) == 0 {
+	_ = replicas // expected number of ServingGroups; actual ordinals may be e.g. 0,1,2,5,6 not 0..4
+	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: modelServingLabelSelector(msName),
+	})
+	if err != nil {
+		return 0, 0
+	}
+	protectedOrd := make(map[int]struct{})
+	updatedOrd := make(map[int]struct{})
+	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
-
-		isProtected := ordinal < partition
-		// During rolling update a group may briefly have two Running pods (old + new).
-		// List order is not guaranteed; require a match on *any* eligible pod so we do not
-		// miss the new image when the old pod still appears first.
-		var sawProtected, sawUpdated bool
-		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
-				continue
-			}
-			if len(pod.Spec.Containers) == 0 {
-				continue
-			}
-			img := pod.Spec.Containers[0].Image
-			if isProtected && e2eImageRefEquivalent(img, nginxImage) {
-				sawProtected = true
-			}
-			if !isProtected && e2eImageRefEquivalent(img, nginxAlpineImage) {
-				sawUpdated = true
-			}
+		if len(pod.Spec.Containers) == 0 {
+			continue
 		}
-		if isProtected && sawProtected {
-			protectedCorrect++
+		gn := pod.Labels[workload.GroupNameLabelKey]
+		if gn == "" {
+			continue
 		}
-		if !isProtected && sawUpdated {
-			updatedCorrect++
+		parent, ord := servingctrlutils.GetParentNameAndOrdinal(gn)
+		if parent != msName || ord < 0 {
+			continue
+		}
+		img := pod.Spec.Containers[0].Image
+		if int32(ord) < partition && e2eImageRefEquivalent(img, nginxImage) {
+			protectedOrd[ord] = struct{}{}
+		}
+		if int32(ord) >= partition && e2eImageRefEquivalent(img, nginxAlpineImage) {
+			updatedOrd[ord] = struct{}{}
 		}
 	}
-	return
+	return len(protectedOrd), len(updatedOrd)
 }
 
+// pickRunningPodInPartitionProtectedGroup returns one Running pod in a partition-protected ServingGroup
+// (ordinal < partition) whose main container uses the historical nginx image. The pod with the smallest
+// such ordinal is chosen. Does not assume ordinals are dense.
+func pickRunningPodInPartitionProtectedGroup(ctx context.Context, kubeClient *kubernetes.Clientset, msName string, partition int32) (pod *corev1.Pod, ordinal int, groupName string, ok bool) {
+	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: modelServingLabelSelector(msName),
+	})
+	if err != nil {
+		return nil, -1, "", false
+	}
+	var best *corev1.Pod
+	bestOrd := -1
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.DeletionTimestamp != nil || p.Status.Phase != corev1.PodRunning || len(p.Spec.Containers) == 0 {
+			continue
+		}
+		gn := p.Labels[workload.GroupNameLabelKey]
+		if gn == "" {
+			continue
+		}
+		parent, ord := servingctrlutils.GetParentNameAndOrdinal(gn)
+		if parent != msName || ord < 0 {
+			continue
+		}
+		if int32(ord) >= partition {
+			continue
+		}
+		if !e2eImageRefEquivalent(p.Spec.Containers[0].Image, nginxImage) {
+			continue
+		}
+		if best == nil || ord < bestOrd {
+			bestOrd = ord
+			best = p
+		}
+	}
+	if best == nil {
+		return nil, -1, "", false
+	}
+	gn := best.Labels[workload.GroupNameLabelKey]
+	if gn == "" {
+		return nil, -1, "", false
+	}
+	return best, bestOrd, gn, true
+}
+
+// verifyAllPodsHaveImage checks every Running pod matched by labelSelector has the expected image on
+// each container (canonicalized). Does not inspect or require dense ServingGroup ordinals.
 func verifyAllPodsHaveImage(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset,
 	labelSelector, expectedImage, phase string) {
 	t.Helper()
@@ -1583,7 +1656,7 @@ func verifyAllPodsHaveImage(t *testing.T, ctx context.Context, kubeClient *kuber
 				return false
 			}
 			for _, container := range pod.Spec.Containers {
-				if container.Image != expectedImage {
+				if !e2eImageRefEquivalent(container.Image, expectedImage) {
 					return false
 				}
 			}
