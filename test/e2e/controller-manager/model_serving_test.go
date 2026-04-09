@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -767,10 +766,10 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	t.Log("ModelServing rolling update maxUnavailable test passed successfully")
 }
 
-// TestModelServingServingGroupOrdinalNoUnboundedIndexDuringRollingUpdate asserts that during a
-// ServingGroup rolling update with no partition (template image change only; default maxUnavailable from
-// createBasicModelServing), no pod has group-name ordinal outside [0, replicas). This is intended to show
-// the ordinal regression can occur without partition — not only in partitioned rollouts.
+// TestModelServingServingGroupOrdinalNoUnboundedIndexDuringRollingUpdate runs a no-partition image rollout
+// (createBasicModelServing), waits until revision and pods converge, then asserts ServingGroup ordinals on
+// Running pods are exactly the dense set {0..replicas-1} (e.g. 0–4 for 5 replicas) — not transient ordinals
+// during the rollout.
 func TestModelServingServingGroupOrdinalNoUnboundedIndexDuringRollingUpdate(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -784,8 +783,6 @@ func TestModelServingServingGroupOrdinalNoUnboundedIndexDuringRollingUpdate(t *t
 	require.NoError(t, err)
 	initialRevision := initialMS.Status.CurrentRevision
 	t.Logf("Initial CurrentRevision: %s", initialRevision)
-
-	stopPoll, sawOrdinalOutOfRange, ordinalDetail := startServingGroupOrdinalOutOfRangePoll(ctx, kubeClient, msName, int(replicas))
 
 	updatedMS := initialMS.DeepCopy()
 	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
@@ -827,17 +824,17 @@ func TestModelServingServingGroupOrdinalNoUnboundedIndexDuringRollingUpdate(t *t
 		t.Logf("Rolling converged (no partition): revision=%s", ms.Status.CurrentRevision)
 		return true
 	}, 6*time.Minute, 2*time.Second, "Rolling update without partition did not converge")
-	stopPoll()
-
-	if sawOrdinalOutOfRange.Load() {
-		d, _ := ordinalDetail.Load().(string)
-		require.Fail(t, "observed ServingGroup ordinal >= replicas during rolling update", "detail: %s", d)
-	}
-	outOfRange, detail := podsHaveServingGroupOrdinalOutOfRange(ctx, kubeClient, msName, int(replicas))
-	require.False(t, outOfRange, "after rolling update, no pod should have ordinal >= replicas: %s", detail)
 
 	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(replicas), 3*time.Minute)
-	t.Log("ServingGroup ordinal in-range check passed after rolling update (no partition)")
+
+	var lastDenseDetail string
+	require.Eventually(t, func() bool {
+		ok, detail := servingGroupOrdinalsDenseZeroToNMinusOne(ctx, kubeClient, msName, int(replicas))
+		lastDenseDetail = detail
+		return ok
+	}, 2*time.Minute, 3*time.Second, "after rollout, ServingGroup ordinals should be dense 0..%d: %s", replicas-1, lastDenseDetail)
+
+	t.Log("ServingGroup ordinals dense 0..N-1 check passed after rolling update (no partition)")
 }
 
 // TestModelServingRoleStatusEvents verifies that role status transitions are surfaced via Kubernetes Events.
@@ -932,44 +929,18 @@ func waitForRunningPodCount(t *testing.T, ctx context.Context, kubeClient *kuber
 	}, timeout, 5*time.Second, "Expected %d running pods for ModelServing %s", expected, msName)
 }
 
-// startServingGroupOrdinalOutOfRangePoll runs podsHaveServingGroupOrdinalOutOfRange on a ticker until stop
-// is called. If any pod ever has ordinal >= replicas, saw is set and detail holds the first explanation.
-func startServingGroupOrdinalOutOfRangePoll(parentCtx context.Context, kubeClient *kubernetes.Clientset, msName string, replicas int) (stop context.CancelFunc, saw *atomic.Bool, detail *atomic.Value) {
-	pollCtx, cancel := context.WithCancel(parentCtx)
-	var sawOrd atomic.Bool
-	var firstDetail atomic.Value // string
-	go func() {
-		ticker := time.NewTicker(250 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-pollCtx.Done():
-				return
-			case <-ticker.C:
-				bad, d := podsHaveServingGroupOrdinalOutOfRange(pollCtx, kubeClient, msName, replicas)
-				if bad {
-					sawOrd.Store(true)
-					if firstDetail.Load() == nil {
-						firstDetail.Store(d)
-					}
-				}
-			}
-		}
-	}()
-	return cancel, &sawOrd, &firstDetail
-}
-
-// podsHaveServingGroupOrdinalOutOfRange returns true if any non-deleting pod for this ModelServing has a
-// group-name label whose ordinal is outside [0, replicas) (parent must match msName).
-func podsHaveServingGroupOrdinalOutOfRange(ctx context.Context, kubeClient *kubernetes.Clientset, msName string, replicas int) (bool, string) {
+// servingGroupOrdinalsDenseZeroToNMinusOne checks that every Running, non-deleting pod for this ModelServing
+// has a group-name ordinal in [0, replicas), and that the set of distinct ordinals is exactly {0,..,replicas-1}.
+func servingGroupOrdinalsDenseZeroToNMinusOne(ctx context.Context, kubeClient *kubernetes.Clientset, msName string, replicas int) (bool, string) {
 	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: modelServingLabelSelector(msName),
 	})
 	if err != nil {
-		return false, ""
+		return false, fmt.Sprintf("list pods: %v", err)
 	}
+	ordSet := make(map[int]struct{})
 	for _, pod := range pods.Items {
-		if pod.DeletionTimestamp != nil {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
 		gn, ok := pod.Labels[workload.GroupNameLabelKey]
@@ -981,10 +952,19 @@ func podsHaveServingGroupOrdinalOutOfRange(ctx context.Context, kubeClient *kube
 			continue
 		}
 		if ord >= replicas {
-			return true, fmt.Sprintf("pod %s group-name=%s (ordinal %d >= replicas %d)", pod.Name, gn, ord, replicas)
+			return false, fmt.Sprintf("ordinal %d not in [0,%d] (group-name=%s pod %s)", ord, replicas-1, gn, pod.Name)
+		}
+		ordSet[ord] = struct{}{}
+	}
+	if len(ordSet) != replicas {
+		return false, fmt.Sprintf("want %d distinct ordinals in [0,%d], got %d", replicas, replicas-1, len(ordSet))
+	}
+	for i := 0; i < replicas; i++ {
+		if _, ok := ordSet[i]; !ok {
+			return false, fmt.Sprintf("missing ordinal %d", i)
 		}
 	}
-	return false, ""
+	return true, ""
 }
 
 // createRole is a helper function to create a Role with specified replicas and workers
