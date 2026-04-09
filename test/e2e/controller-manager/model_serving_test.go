@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,7 +33,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/utils/ptr"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
@@ -769,21 +767,17 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	t.Log("ModelServing rolling update maxUnavailable test passed successfully")
 }
 
-// TestModelServingServingGroupOrdinalNoUnboundedIndexDuringPartitionRollingUpdate asserts that during a
-// partitioned ServingGroup rolling update (template image change — same flow as partition boundary tests),
-// no pod carries a group-name ordinal outside [0, replicas). Polls throughout the rollout; waits for
-// partition+revision convergence via Eventually (not WaitForModelServingReady alone).
-func TestModelServingServingGroupOrdinalNoUnboundedIndexDuringPartitionRollingUpdate(t *testing.T) {
+// TestModelServingServingGroupOrdinalNoUnboundedIndexDuringRollingUpdate asserts that during a
+// ServingGroup rolling update with no partition (template image change only; default maxUnavailable from
+// createBasicModelServing), no pod has group-name ordinal outside [0, replicas). This is intended to show
+// the ordinal regression can occur without partition — not only in partitioned rollouts.
+func TestModelServingServingGroupOrdinalNoUnboundedIndexDuringRollingUpdate(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
-	const (
-		replicas  = int32(5)
-		partition = int32(3)
-	)
-
-	msName := "test-sg-ordinal-partition-roll"
-	modelServing := createPartitionedModelServing(msName, replicas, partition)
-	t.Logf("Creating ModelServing %s with replicas=%d partition=%d (partitioned rolling update)", msName, replicas, partition)
+	const replicas int32 = 5
+	msName := "test-sg-ordinal-roll-no-partition"
+	modelServing := createBasicModelServing(msName, replicas, 0)
+	t.Logf("Creating ModelServing %s replicas=%d (no partition; rollout via image change)", msName, replicas)
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
@@ -799,35 +793,51 @@ func TestModelServingServingGroupOrdinalNoUnboundedIndexDuringPartitionRollingUp
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
 	require.NoError(t, err)
 
+	labelSelector := modelServingLabelSelector(msName)
 	require.Eventually(t, func() bool {
 		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 		if err != nil {
 			return false
 		}
-		protectedCorrect, updatedCorrect := verifyPartitionState(t, ctx, kubeClient, modelServing.Name, partition, replicas)
-		t.Logf("CurrentRevision: %s, UpdateRevision: %s, Protected: %d/%d, Updated: %d/%d",
-			ms.Status.CurrentRevision, ms.Status.UpdateRevision, protectedCorrect, partition, updatedCorrect, replicas-partition)
-		ok := ms.Status.CurrentRevision == initialRevision &&
-			ms.Status.UpdateRevision != "" &&
-			ms.Status.UpdateRevision != initialRevision &&
-			protectedCorrect == int(partition) &&
-			updatedCorrect == int(replicas-partition)
-		if !ok {
-			logPartitionPodInventory(t, ctx, kubeClient, modelServing.Name, replicas, partition)
+		if ms.Status.UpdateRevision == "" || ms.Status.CurrentRevision != ms.Status.UpdateRevision {
+			return false
 		}
-		return ok
-	}, 6*time.Minute, 2*time.Second, "Partition rolling state did not converge")
+		if ms.Status.UpdateRevision == initialRevision {
+			return false
+		}
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil || len(pods.Items) == 0 {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+				return false
+			}
+			seen := false
+			for _, c := range pod.Spec.Containers {
+				if c.Name == "test-container" && c.Image == nginxAlpineImage {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				return false
+			}
+		}
+		t.Logf("Rolling converged (no partition): revision=%s", ms.Status.CurrentRevision)
+		return true
+	}, 6*time.Minute, 2*time.Second, "Rolling update without partition did not converge")
 	stopPoll()
 
 	if sawOrdinalOutOfRange.Load() {
 		d, _ := ordinalDetail.Load().(string)
-		require.Fail(t, "observed ServingGroup ordinal >= replicas during partition rolling update", "detail: %s", d)
+		require.Fail(t, "observed ServingGroup ordinal >= replicas during rolling update", "detail: %s", d)
 	}
 	outOfRange, detail := podsHaveServingGroupOrdinalOutOfRange(ctx, kubeClient, msName, int(replicas))
-	require.False(t, outOfRange, "after partition rolling update, no pod should have ordinal >= replicas: %s", detail)
+	require.False(t, outOfRange, "after rolling update, no pod should have ordinal >= replicas: %s", detail)
 
 	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(replicas), 3*time.Minute)
-	t.Log("ServingGroup ordinal in-range check passed after partition rolling update")
+	t.Log("ServingGroup ordinal in-range check passed after rolling update (no partition)")
 }
 
 // TestModelServingRoleStatusEvents verifies that role status transitions are surfaced via Kubernetes Events.
@@ -1073,155 +1083,6 @@ func createBasicModelServing(name string, servingGroupReplicas, workloadRoleRepl
 				Roles: roles,
 			},
 		},
-	}
-}
-
-// createPartitionedModelServing builds a ModelServing with ServingGroupRollingUpdate and partition.
-// maxUnavailable is set to replicas so post-partition groups are not stalled when several are recreating.
-func createPartitionedModelServing(name string, replicas, partition int32) *workload.ModelServing {
-	roleReplicas := int32(1)
-	return &workload.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: testNamespace,
-		},
-		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
-			RolloutStrategy: &workload.RolloutStrategy{
-				Type: workload.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					Partition:      ptr.To(intstr.FromInt32(partition)),
-					MaxUnavailable: ptr.To(intstr.FromInt(int(replicas))),
-				},
-			},
-			Template: workload.ServingGroup{
-				Roles: []workload.Role{
-					{
-						Name:     "prefill",
-						Replicas: &roleReplicas,
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: nginxImage,
-										Ports: []corev1.ContainerPort{
-											{Name: "http", ContainerPort: 80},
-										},
-									},
-								},
-							},
-						},
-						WorkerReplicas: 0,
-					},
-				},
-			},
-		},
-	}
-}
-
-// canonicalE2EImageRef normalizes container image strings for comparison (registry prefix, digest).
-func canonicalE2EImageRef(image string) string {
-	image = strings.TrimSpace(image)
-	if i := strings.Index(image, "@"); i >= 0 {
-		image = image[:i]
-	}
-	if i := strings.LastIndex(image, "/"); i >= 0 {
-		image = image[i+1:]
-	}
-	return image
-}
-
-func e2eImageRefEquivalent(actual, expected string) bool {
-	return canonicalE2EImageRef(actual) == canonicalE2EImageRef(expected)
-}
-
-func verifyPartitionState(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset,
-	msName string, partition, replicas int32) (protectedCorrect, updatedCorrect int) {
-	t.Helper()
-	for ordinal := int32(0); ordinal < replicas; ordinal++ {
-		groupName := fmt.Sprintf("%s-%d", msName, ordinal)
-		labelSelector := fmt.Sprintf("%s=%s", workload.GroupNameLabelKey, groupName)
-
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil || len(pods.Items) == 0 {
-			continue
-		}
-
-		isProtected := ordinal < partition
-		var sawProtected, sawUpdated bool
-		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
-				continue
-			}
-			if len(pod.Spec.Containers) == 0 {
-				continue
-			}
-			img := pod.Spec.Containers[0].Image
-			if isProtected && e2eImageRefEquivalent(img, nginxImage) {
-				sawProtected = true
-			}
-			if !isProtected && e2eImageRefEquivalent(img, nginxAlpineImage) {
-				sawUpdated = true
-			}
-		}
-		if isProtected && sawProtected {
-			protectedCorrect++
-		}
-		if !isProtected && sawUpdated {
-			updatedCorrect++
-		}
-	}
-	return
-}
-
-func logPartitionPodInventory(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, msName string, replicas, partition int32) {
-	t.Helper()
-	t.Logf("--- partition pod inventory ms=%s replicas=%d partition=%d ---", msName, replicas, partition)
-	for ordinal := int32(0); ordinal < replicas; ordinal++ {
-		groupName := fmt.Sprintf("%s-%d", msName, ordinal)
-		labelSelector := fmt.Sprintf("%s=%s", workload.GroupNameLabelKey, groupName)
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
-		if err != nil {
-			t.Logf("ordinal=%d group=%s LIST ERROR: %v", ordinal, groupName, err)
-			continue
-		}
-		zone := "UPDATED"
-		if ordinal < partition {
-			zone = "PROTECTED"
-		}
-		t.Logf("ordinal=%d zone=%s group=%s podCount=%d", ordinal, zone, groupName, len(pods.Items))
-		for i := range pods.Items {
-			p := &pods.Items[i]
-			specImgs := make([]string, 0, len(p.Spec.Containers))
-			for _, c := range p.Spec.Containers {
-				specImgs = append(specImgs, fmt.Sprintf("%s->%s", c.Name, c.Image))
-			}
-			stLines := make([]string, 0, len(p.Status.ContainerStatuses))
-			for _, cs := range p.Status.ContainerStatuses {
-				stLines = append(stLines, fmt.Sprintf("%s:image=%s ready=%v restart=%d state=%s",
-					cs.Name, cs.Image, cs.Ready, cs.RestartCount, containerStateString(cs.State)))
-			}
-			t.Logf("  pod[%d] name=%s phase=%s node=%s deleting=%v specContainers=[%s] status=[%s]",
-				i, p.Name, p.Status.Phase, p.Spec.NodeName, p.DeletionTimestamp != nil,
-				strings.Join(specImgs, ", "), strings.Join(stLines, "; "))
-		}
-	}
-	t.Logf("--- end partition pod inventory ---")
-}
-
-func containerStateString(st corev1.ContainerState) string {
-	switch {
-	case st.Running != nil:
-		return "Running"
-	case st.Waiting != nil:
-		return fmt.Sprintf("Waiting:%s:%s", st.Waiting.Reason, st.Waiting.Message)
-	case st.Terminated != nil:
-		return fmt.Sprintf("Terminated:%s:exit=%d", st.Terminated.Reason, st.Terminated.ExitCode)
-	default:
-		return "Unknown"
 	}
 }
 
