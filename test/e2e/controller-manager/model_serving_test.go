@@ -1352,7 +1352,10 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, podToDelete.Name, metav1.DeleteOptions{})
 	require.NoError(t, err)
 
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+	// Do not call WaitForModelServingReady here: it only checks Status.AvailableReplicas >= Spec.Replicas.
+	// After a single-pod delete, that aggregate can lag or stall while the replacement is counted, causing
+	// a 5-minute poll and (with package -timeout) apparent hangs. The assertion below is scoped to this
+	// ServingGroup and the historical image only.
 
 	require.Eventually(t, func() bool {
 		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
@@ -1377,7 +1380,7 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 			}
 		}
 		return false
-	}, 3*time.Minute, 2*time.Second, "Recreated pod should use historical revision")
+	}, 5*time.Minute, 2*time.Second, "Recreated pod should use historical revision")
 
 	protectedCorrect, updatedCorrect := verifyPartitionState(t, ctx, kubeClient, modelServing.Name, partition, replicas)
 	assert.Equal(t, int(partition), protectedCorrect)
