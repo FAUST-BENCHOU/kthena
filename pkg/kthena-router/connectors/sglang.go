@@ -27,8 +27,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"k8s.io/klog/v2"
 
+	v1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 )
+
+// ConnectorTypeSGLang is the KVConnectorType value for SGLang disaggregated prefill-decode.
+// It is intentionally defined here (not in the API types) so that it does not appear in
+// generated CRD docs or schema enums — SGLang routing is selected automatically based on
+// InferenceEngine, not by the user.
+const ConnectorTypeSGLang v1alpha1.KVConnectorType = "sglang"
 
 // SGLangConnector implements PD disaggregated inference for SGLang.
 //
