@@ -108,6 +108,7 @@ const (
 	ConnectorTypeNIXL     KVConnectorType = "nixl"     // Indicates `NixlConnector` in vllm
 	ConnectorTypeLMCache  KVConnectorType = "lmcache"  // Indicates `LmcacheConnector` in vllm
 	ConnectorTypeMoonCake KVConnectorType = "mooncake" // Indicates `MoonCakeConnector` in vllm-ascend
+	ConnectorTypeSGLang   KVConnectorType = "sglang"   // Indicates SGLang disaggregated prefill-decode (internal use only)
 )
 
 // KVConnectorSpec defines KV connector configuration for PD disaggregated routing

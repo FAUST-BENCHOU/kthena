@@ -909,10 +909,13 @@ func (r *Router) getKVConnector(modelServerName types.NamespacedName) (connector
 		return nil, fmt.Errorf("model server %s not found", modelServerName)
 	}
 
-	// Determine connector type from ModelServer CRD
+	// Determine connector type from ModelServer CRD.
+	// If kvConnector is explicitly set, use it; otherwise infer from inferenceEngine.
 	connectorType := v1alpha1.ConnectorTypeHTTP
 	if modelServer.Spec.KVConnector != nil && modelServer.Spec.KVConnector.Type != "" {
 		connectorType = modelServer.Spec.KVConnector.Type
+	} else if modelServer.Spec.InferenceEngine == v1alpha1.SGLang {
+		connectorType = v1alpha1.ConnectorTypeSGLang
 	}
 
 	connector := r.connectorFactory.GetConnector(connectorType)
