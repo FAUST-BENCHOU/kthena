@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
 	corev1 "k8s.io/api/core/v1"
@@ -52,6 +53,85 @@ import (
 type resourceSpec struct {
 	name   string
 	labels map[string]string
+}
+
+type testQueue interface {
+	Len() int
+	Get() (item interface{}, shutdown bool)
+	Done(item interface{})
+	Forget(item interface{})
+}
+
+func newModelServingForDeleteTest(namespace, name string) *workloadv1alpha1.ModelServing {
+	return &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			UID:       types.UID(fmt.Sprintf("%s-uid", name)),
+		},
+	}
+}
+
+func newPodGroupForDeleteTest(ms *workloadv1alpha1.ModelServing, groupName string, ownerUID types.UID) *schedulingv1beta1.PodGroup {
+	if ownerUID == "" {
+		ownerUID = ms.UID
+	}
+	return &schedulingv1beta1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      groupName,
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+					Kind:       workloadv1alpha1.ModelServingKind.Kind,
+					Name:       ms.Name,
+					UID:        ownerUID,
+				},
+			},
+		},
+	}
+}
+
+func drainWorkqueue(t *testing.T, queue testQueue) {
+	t.Helper()
+	for queue.Len() > 0 {
+		item, shutdown := queue.Get()
+		require.False(t, shutdown)
+		queue.Done(item)
+		queue.Forget(item)
+	}
+}
+
+func assertQueueEmpty(t *testing.T, queue testQueue) {
+	t.Helper()
+	require.Equal(t, 0, queue.Len())
+}
+
+func assertQueuedKey(t *testing.T, queue testQueue, key string) {
+	t.Helper()
+	require.Greater(t, queue.Len(), 0, "expected %s to be queued", key)
+
+	item, shutdown := queue.Get()
+	require.False(t, shutdown)
+	queue.Done(item)
+	queue.Forget(item)
+
+	actualKey, ok := item.(string)
+	require.True(t, ok, "expected queued item to be a string key")
+	require.Equal(t, key, actualKey)
+}
+
+func assertQueueStaysEmpty(t *testing.T, queue testQueue, duration time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		require.Equal(t, 0, queue.Len())
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // fakePodGroupManager is a test double for PodGroupManager
@@ -106,19 +186,27 @@ func (f *fakePodGroupManager) AnnotatePodWithPodGroup(pod *corev1.Pod, ms *workl
 	pod.Annotations["scheduling.volcano.sh/task-name"] = taskName
 }
 
-func TestCreateOrUpdatePodGroupByServingGroupRequeue(t *testing.T) {
-	called := false
-	var delay time.Duration
+func TestNewTestController_HasSyncedQueueAndStores(t *testing.T) {
+	h := newTestController(t)
 
-	controller := &ModelServingController{
-		podGroupManager: &fakePodGroupManager{
-			createOrUpdateFunc: func(_ context.Context, _ *workloadv1alpha1.ModelServing, _ string) (error, time.Duration) {
-				return fmt.Errorf("retry"), 2 * time.Second
-			},
-		},
-		enqueueModelServingAfterFunc: func(_ *workloadv1alpha1.ModelServing, duration time.Duration) {
-			called = true
-			delay = duration
+	require.NotNil(t, h.controller)
+	require.NotNil(t, h.kubeClient)
+	require.NotNil(t, h.kthenaClient)
+	require.NotNil(t, h.controller.workqueue)
+	require.NotNil(t, h.controller.store)
+	require.Equal(t, 0, h.controller.workqueue.Len())
+	require.True(t, h.controller.podsInformer.HasSynced())
+	require.True(t, h.controller.servicesInformer.HasSynced())
+	require.True(t, h.controller.modelServingsInformer.HasSynced())
+	require.True(t, h.controller.initialSync)
+}
+
+func TestCreateOrUpdatePodGroupByServingGroupRequeue(t *testing.T) {
+	h := newTestController(t)
+	controller := h.controller
+	controller.podGroupManager = &fakePodGroupManager{
+		createOrUpdateFunc: func(_ context.Context, _ *workloadv1alpha1.ModelServing, _ string) (error, time.Duration) {
+			return fmt.Errorf("retry"), 50 * time.Millisecond
 		},
 	}
 	ms := &workloadv1alpha1.ModelServing{
@@ -130,26 +218,10 @@ func TestCreateOrUpdatePodGroupByServingGroupRequeue(t *testing.T) {
 
 	err := controller.createOrUpdatePodGroupByServingGroup(context.Background(), ms, "ms-0")
 	assert.NoError(t, err)
-	assert.True(t, called)
-	assert.Equal(t, 2*time.Second, delay)
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
 
 func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
-	kubeClient := kubefake.NewSimpleClientset()
-	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
-	podInformer := informerFactory.Core().V1().Pods()
-
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	informerFactory.Start(stopCh)
-	informerFactory.WaitForCacheSync(stopCh)
-
-	controller := &ModelServingController{
-		kubeClientSet: kubeClient,
-		podsLister:    podInformer.Lister(),
-		podsInformer:  podInformer.Informer(),
-	}
-
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ms",
@@ -158,10 +230,20 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 		},
 	}
 
+	h := newTestController(t, ms)
+	controller := h.controller
+
 	existing := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ms-entry-0",
 			Namespace: "default",
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        "ms-0",
+				workloadv1alpha1.RoleLabelKey:             "role",
+				workloadv1alpha1.RoleIDKey:                "role-0",
+				workloadv1alpha1.EntryLabelKey:            utils.Entry,
+			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
@@ -172,9 +254,24 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 		},
 	}
 
-	_, err := kubeClient.CoreV1().Pods("default").Create(context.Background(), existing, metav1.CreateOptions{})
+	_, err := h.kubeClient.CoreV1().Pods("default").Create(context.Background(), existing, metav1.CreateOptions{})
 	assert.NoError(t, err)
-	assert.NoError(t, podInformer.Informer().GetIndexer().Add(existing))
+	require.Eventually(t, func() bool {
+		_, err := controller.podsLister.Pods("default").Get(existing.Name)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	drainQueue := func() {
+		for controller.workqueue.Len() > 0 {
+			item, shutdown := controller.workqueue.Get()
+			require.False(t, shutdown)
+			controller.workqueue.Done(item)
+			controller.workqueue.Forget(item)
+		}
+	}
+	drainQueue()
+	require.Eventually(t, func() bool {
+		return controller.workqueue.Len() == 0
+	}, 2*time.Second, 10*time.Millisecond)
 
 	newPod := existing.DeepCopy()
 	newPod.OwnerReferences = []metav1.OwnerReference{
@@ -185,52 +282,44 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 		},
 	}
 
-	called := false
-	controller.enqueueModelServingAfterFunc = func(_ *workloadv1alpha1.ModelServing, _ time.Duration) {
-		called = true
-	}
-
 	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod, true, nil, "entry")
 	assert.NoError(t, err)
-	assert.True(t, called)
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
 
 func TestDeletePodGroupEnqueues(t *testing.T) {
-	controller := &ModelServingController{}
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "ms",
-			Namespace: "default",
-			UID:       types.UID("ms-uid"),
-		},
-	}
-	podGroup := &schedulingv1beta1.PodGroup{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "ms-0",
-			Namespace: "default",
-			Labels: map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
-				workloadv1alpha1.GroupNameLabelKey:        "ms-0",
-			},
-		},
-	}
+	ms := newModelServingForDeleteTest("default", "ms")
+	h := newTestController(t, ms)
+	controller := h.controller
 
-	called := false
-	controller.getModelServingAndResourceDetailsFunc = func(_ metav1.Object) (*workloadv1alpha1.ModelServing, string, string, string) {
-		return ms, "ms-0", "", ""
-	}
-	controller.shouldSkipHandlingFunc = func(_ *workloadv1alpha1.ModelServing, _ string, _ metav1.Object) bool {
-		return false
-	}
-	controller.handleDeletionInProgressFunc = func(_ *workloadv1alpha1.ModelServing, _ string, _ string, _ string) bool {
-		return false
-	}
-	controller.enqueueModelServingFunc = func(_ *workloadv1alpha1.ModelServing) {
-		called = true
-	}
+	require.Eventually(t, func() bool {
+		_, err := controller.modelServingLister.ModelServings(ms.Namespace).Get(ms.Name)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	drainWorkqueue(t, controller.workqueue)
+	assertQueueEmpty(t, controller.workqueue)
 
+	podGroup := newPodGroupForDeleteTest(ms, "ms-0", ms.UID)
 	controller.deletePodGroup(podGroup)
-	assert.True(t, called)
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+}
+
+func TestDeletePodGroupOwnerMismatchDoesNotEnqueue(t *testing.T) {
+	ms := newModelServingForDeleteTest("default", "ms")
+	h := newTestController(t, ms)
+	controller := h.controller
+
+	require.Eventually(t, func() bool {
+		_, err := controller.modelServingLister.ModelServings(ms.Namespace).Get(ms.Name)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	drainWorkqueue(t, controller.workqueue)
+	assertQueueEmpty(t, controller.workqueue)
+
+	podGroup := newPodGroupForDeleteTest(ms, "ms-0", types.UID("other-uid"))
+	controller.deletePodGroup(podGroup)
+
+	assertQueueStaysEmpty(t, controller.workqueue, 200*time.Millisecond)
 }
 
 func TestIsServingGroupOutdated(t *testing.T) {
@@ -4511,12 +4600,6 @@ func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
 				assert.NoError(t, err)
 			}
 
-			// Track which roles are deleted (targeted for deletion)
-			var deletedRoleIDs []string
-			controller.deleteRoleFunc = func(_ context.Context, _ *workloadv1alpha1.ModelServing, _, _, roleID string) {
-				deletedRoleIDs = append(deletedRoleIDs, roleID)
-			}
-
 			// Target role (using first role's spec)
 			targetRole := workloadv1alpha1.Role{
 				Name:     "prefill",
@@ -4535,20 +4618,45 @@ func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
 				delete(allRoleIDs, remaining)
 			}
 			var expectedDeletedRoleIDs []string
+			var expectedDeleteSelectors []string
 			for id := range allRoleIDs {
 				expectedDeletedRoleIDs = append(expectedDeletedRoleIDs, id)
+				expectedDeleteSelectors = append(expectedDeleteSelectors, labels.SelectorFromSet(map[string]string{
+					workloadv1alpha1.GroupNameLabelKey: groupName,
+					workloadv1alpha1.RoleLabelKey:      "prefill",
+					workloadv1alpha1.RoleIDKey:         id,
+				}).String())
 			}
 
-			// Verify correct number of deletions
-			numToDelete := len(tt.existingIndices) - tt.expectedCount
-			assert.Equal(t, numToDelete, len(deletedRoleIDs),
-				"Expected %d deletions, got %d", numToDelete, len(deletedRoleIDs))
+			var actualDeletedRoleIDs []string
+			var actualDeleteSelectors []string
+			for _, action := range kubeClient.Actions() {
+				if !action.Matches("delete-collection", "pods") {
+					continue
+				}
+				deleteAction, ok := action.(kubetesting.DeleteCollectionAction)
+				require.True(t, ok)
+				actualDeleteSelectors = append(actualDeleteSelectors, deleteAction.GetListRestrictions().Labels.String())
+			}
+			for _, idx := range tt.existingIndices {
+				roleID := fmt.Sprintf("prefill-%d", idx)
+				if controller.store.GetRoleStatus(nsn, groupName, "prefill", roleID) == datastore.RoleDeleting {
+					actualDeletedRoleIDs = append(actualDeletedRoleIDs, roleID)
+				}
+			}
 
-			// Verify the correct roles were targeted for deletion
-			sort.Strings(deletedRoleIDs)
+			// Verify correct roles were marked deleting and targeted through pod delete actions.
+			assert.Len(t, actualDeletedRoleIDs, len(tt.existingIndices)-tt.expectedCount)
+
+			sort.Strings(actualDeletedRoleIDs)
 			sort.Strings(expectedDeletedRoleIDs)
-			assert.Equal(t, expectedDeletedRoleIDs, deletedRoleIDs,
-				"%s: Expected deleted roles %v, got %v", tt.description, expectedDeletedRoleIDs, deletedRoleIDs)
+			assert.Equal(t, expectedDeletedRoleIDs, actualDeletedRoleIDs,
+				"%s: expected deleted roles %v, got %v", tt.description, expectedDeletedRoleIDs, actualDeletedRoleIDs)
+
+			sort.Strings(actualDeleteSelectors)
+			sort.Strings(expectedDeleteSelectors)
+			assert.Equal(t, expectedDeleteSelectors, actualDeleteSelectors,
+				"%s: expected pod delete selectors %v, got %v", tt.description, expectedDeleteSelectors, actualDeleteSelectors)
 		})
 	}
 }
@@ -5770,29 +5878,9 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 			volcanoClient := volcanofake.NewSimpleClientset()
 			apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 
-			// Create informer factories
-			kubeInformerFactory := informers.NewSharedInformerFactory(client, 0)
-			kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
-
 			// Create controller
 			controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextfake)
 			assert.NoError(t, err)
-
-			stop := make(chan struct{})
-			defer close(stop)
-
-			go controller.Run(context.Background(), 1)
-
-			// Start informers
-			kthenaInformerFactory.Start(stop)
-			kubeInformerFactory.Start(stop)
-
-			// Wait for cache sync
-			cache.WaitForCacheSync(stop,
-				controller.modelServingsInformer.HasSynced,
-				controller.podsInformer.HasSynced,
-				controller.servicesInformer.HasSynced,
-			)
 
 			if tt.podDeletionError != nil {
 				client.PrependReactor("delete-collection", "pods", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
@@ -5848,6 +5936,9 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 				},
 			}
 
+			drainWorkqueue(t, controller.workqueue)
+			assertQueueEmpty(t, controller.workqueue)
+
 			_, err = client.CoreV1().Pods("default").Create(context.TODO(), pod, metav1.CreateOptions{})
 			assert.NoError(t, err)
 
@@ -5856,21 +5947,45 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 			err = controller.servicesInformer.GetIndexer().Add(service)
 			assert.NoError(t, err)
 
-			queue := []string{}
-			controller.enqueueModelServingFunc = func(ms *workloadv1alpha1.ModelServing) {
-				queue = append(queue, ms.Name)
-			}
+			startAction := len(client.Actions())
 
 			controller.DeleteRole(context.Background(), ms, groupName, roleName, roleID)
 
 			finalStatus := controller.store.GetRoleStatus(nsn, groupName, roleName, roleID)
 			assert.Equal(t, tt.expectedFinalStatus, finalStatus)
 
-			queueLen := len(queue)
 			if tt.expectEnqueueCalled {
-				assert.True(t, queueLen > 0, "should enqueue")
+				assertQueuedKey(t, controller.workqueue, namespacedKey(ms.Namespace, ms.Name))
+				assertQueueEmpty(t, controller.workqueue)
 			} else {
-				assert.Equal(t, 0, queueLen, "should not enqueue")
+				assertQueueStaysEmpty(t, controller.workqueue, 100*time.Millisecond)
+			}
+
+			expectedDeleteSelector := labels.SelectorFromSet(map[string]string{
+				workloadv1alpha1.GroupNameLabelKey: groupName,
+				workloadv1alpha1.RoleLabelKey:      roleName,
+				workloadv1alpha1.RoleIDKey:         roleID,
+			}).String()
+			var podDeleteSelectors []string
+			var serviceDeleteNames []string
+			for _, action := range client.Actions()[startAction:] {
+				switch {
+				case action.Matches("delete-collection", "pods"):
+					deleteAction, ok := action.(kubetesting.DeleteCollectionAction)
+					require.True(t, ok)
+					podDeleteSelectors = append(podDeleteSelectors, deleteAction.GetListRestrictions().Labels.String())
+				case action.Matches("delete", "services"):
+					deleteAction, ok := action.(kubetesting.DeleteAction)
+					require.True(t, ok)
+					serviceDeleteNames = append(serviceDeleteNames, deleteAction.GetName())
+				}
+			}
+
+			assert.Equal(t, []string{expectedDeleteSelector}, podDeleteSelectors)
+			if tt.podDeletionError != nil {
+				assert.Empty(t, serviceDeleteNames)
+			} else {
+				assert.Equal(t, []string{service.Name}, serviceDeleteNames)
 			}
 		})
 	}
@@ -6211,6 +6326,7 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 		podDeletionError      error
 		serviceDeletionError  error
 		expectedFinalStatus   datastore.ServingGroupStatus
+		expectError           bool
 		expectEnqueueCalled   bool
 		description           string
 	}{
@@ -6221,6 +6337,7 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			podDeletionError:      nil,
 			serviceDeletionError:  nil,
 			expectedFinalStatus:   datastore.ServingGroupRunning,
+			expectError:           true,
 			expectEnqueueCalled:   true,
 			description:           "failed to delete pod group, should rollback to original status and re-enqueue",
 		},
@@ -6231,6 +6348,7 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			podDeletionError:      fmt.Errorf("failed to delete pods"),
 			serviceDeletionError:  nil,
 			expectedFinalStatus:   datastore.ServingGroupCreating,
+			expectError:           true,
 			expectEnqueueCalled:   true,
 			description:           "failed to delete pods, should rollback to original status and re-enqueue",
 		},
@@ -6241,6 +6359,7 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			podDeletionError:      nil,
 			serviceDeletionError:  fmt.Errorf("failed to delete services"),
 			expectedFinalStatus:   datastore.ServingGroupRunning,
+			expectError:           true,
 			expectEnqueueCalled:   true,
 			description:           "failed to delete services, should rollback to original status and re-enqueue",
 		},
@@ -6251,6 +6370,7 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			podDeletionError:      nil,
 			serviceDeletionError:  nil,
 			expectedFinalStatus:   datastore.ServingGroupDeleting,
+			expectError:           false,
 			expectEnqueueCalled:   false,
 			description:           "all deletions succeed, no rollback needed",
 		},
@@ -6261,37 +6381,21 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			client := kubefake.NewSimpleClientset()
 			kthenaClient := kthenafake.NewSimpleClientset()
 			volcanoClient := volcanofake.NewSimpleClientset()
-			apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-
-			// Create informer factories
-			kubeInformerFactory := informers.NewSharedInformerFactory(client, 0)
-			kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+			apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 
 			// Create controller
-			controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextfake)
+			controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextClient)
 			assert.NoError(t, err)
 
-			stop := make(chan struct{})
-			defer close(stop)
-
-			go controller.Run(context.Background(), 1)
-
-			// Start informers
-			kthenaInformerFactory.Start(stop)
-			kubeInformerFactory.Start(stop)
-
-			// Wait for cache sync
-			cache.WaitForCacheSync(stop,
-				controller.modelServingsInformer.HasSynced,
-				controller.podsInformer.HasSynced,
-				controller.servicesInformer.HasSynced,
-			)
-
-			// Mock PodGroup deletion behavior using fakePodGroupManager
+			podGroupManager := podgroupmanager.NewManager(client, volcanoClient, apiextClient, nil)
 			controller.podGroupManager = &fakePodGroupManager{
-				deleteFunc: func(_ context.Context, _ *workloadv1alpha1.ModelServing, _ string) error {
-					return tt.podGroupDeletionError
-				},
+				deleteFunc: podGroupManager.DeletePodGroup,
+			}
+
+			if tt.podGroupDeletionError != nil {
+				volcanoClient.PrependReactor("delete", "podgroups", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+					return true, nil, tt.podGroupDeletionError
+				})
 			}
 
 			if tt.podDeletionError != nil {
@@ -6342,7 +6446,12 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 				},
 			}
 
+			drainWorkqueue(t, controller.workqueue)
+			assertQueueEmpty(t, controller.workqueue)
+
 			_, err = client.CoreV1().Pods("default").Create(context.TODO(), pod, metav1.CreateOptions{})
+			assert.NoError(t, err)
+			err = controller.podsInformer.GetIndexer().Add(pod)
 			assert.NoError(t, err)
 
 			_, err = client.CoreV1().Services("default").Create(context.TODO(), service, metav1.CreateOptions{})
@@ -6350,21 +6459,66 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			err = controller.servicesInformer.GetIndexer().Add(service)
 			assert.NoError(t, err)
 
-			queue := []string{}
-			controller.enqueueModelServingFunc = func(ms *workloadv1alpha1.ModelServing) {
-				queue = append(queue, ms.Name)
-			}
+			startAction := len(client.Actions())
+			startVolcanoAction := len(volcanoClient.Actions())
 
-			_ = controller.deleteServingGroup(context.Background(), ms, sgName)
+			err = controller.deleteServingGroup(context.Background(), ms, sgName)
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
 
 			finalStatus := controller.store.GetServingGroupStatus(nsn, sgName)
 			assert.Equal(t, tt.expectedFinalStatus, finalStatus, "final ServingGroup status should match expected")
 
-			queueLen := len(queue)
 			if tt.expectEnqueueCalled {
-				assert.True(t, queueLen > 0, "should have enqueued for reconcile")
+				assertQueuedKey(t, controller.workqueue, namespacedKey(ms.Namespace, ms.Name))
+				assertQueueEmpty(t, controller.workqueue)
 			} else {
-				assert.Equal(t, 0, queueLen, "should not have enqueued for reconcile")
+				assertQueueStaysEmpty(t, controller.workqueue, 100*time.Millisecond)
+			}
+
+			expectedDeleteSelector := labels.SelectorFromSet(map[string]string{
+				workloadv1alpha1.GroupNameLabelKey: sgName,
+			}).String()
+			var podDeleteSelectors []string
+			var serviceDeleteNames []string
+			for _, action := range client.Actions()[startAction:] {
+				switch {
+				case action.Matches("delete-collection", "pods"):
+					deleteAction, ok := action.(kubetesting.DeleteCollectionAction)
+					require.True(t, ok)
+					podDeleteSelectors = append(podDeleteSelectors, deleteAction.GetListRestrictions().Labels.String())
+				case action.Matches("delete", "services"):
+					deleteAction, ok := action.(kubetesting.DeleteAction)
+					require.True(t, ok)
+					serviceDeleteNames = append(serviceDeleteNames, deleteAction.GetName())
+				}
+			}
+			var podGroupDeleteNames []string
+			for _, action := range volcanoClient.Actions()[startVolcanoAction:] {
+				if !action.Matches("delete", "podgroups") {
+					continue
+				}
+				deleteAction, ok := action.(kubetesting.DeleteAction)
+				require.True(t, ok)
+				podGroupDeleteNames = append(podGroupDeleteNames, deleteAction.GetName())
+			}
+
+			assert.Equal(t, []string{sgName}, podGroupDeleteNames)
+
+			if tt.podGroupDeletionError != nil {
+				assert.Empty(t, podDeleteSelectors)
+				assert.Empty(t, serviceDeleteNames)
+				return
+			}
+
+			assert.Equal(t, []string{expectedDeleteSelector}, podDeleteSelectors)
+			if tt.podDeletionError != nil {
+				assert.Empty(t, serviceDeleteNames)
+			} else {
+				assert.Equal(t, []string{service.Name}, serviceDeleteNames)
 			}
 		})
 	}
