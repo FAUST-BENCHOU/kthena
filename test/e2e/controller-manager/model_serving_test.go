@@ -1344,11 +1344,13 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 
 	podToDelete, pickedOrd, targetGroupName, ok := pickRunningPodInPartitionProtectedGroup(ctx, kubeClient, modelServing.Name, partition)
 	require.True(t, ok, "need one Running pod in a partition-protected group (ordinal < partition) on historical image")
-	labelSelector := fmt.Sprintf("modelserving.volcano.sh/group-name=%s", targetGroupName)
+	groupSelector := fmt.Sprintf("modelserving.volcano.sh/group-name=%s", targetGroupName)
+	msSelector := modelServingLabelSelector(modelServing.Name)
 
 	originalUID := podToDelete.UID
 	t.Logf("Deleting pod %s (ordinal %d group=%s)", podToDelete.Name, pickedOrd, targetGroupName)
-	logServingGroupPods(t, ctx, kubeClient, labelSelector, "before delete")
+	logServingGroupPods(t, ctx, kubeClient, groupSelector, "before delete (group selector)")
+	logServingGroupPods(t, ctx, kubeClient, msSelector, "before delete (ms selector)")
 
 	// Use a dedicated, bounded context for DELETE to avoid indefinite hangs when apiserver/network is unhealthy.
 	// Also request immediate deletion to reduce time spent in Terminating.
@@ -1362,7 +1364,8 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	})
 	if err != nil {
 		t.Logf("Pod delete returned error: %v", err)
-		logServingGroupPods(t, ctx, kubeClient, labelSelector, "after delete error")
+		logServingGroupPods(t, ctx, kubeClient, groupSelector, "after delete error (group selector)")
+		logServingGroupPods(t, ctx, kubeClient, msSelector, "after delete error (ms selector)")
 	}
 	require.NoError(t, err)
 
@@ -1371,38 +1374,56 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	// a 5-minute poll and (with package -timeout) apparent hangs. The assertion below is scoped to this
 	// ServingGroup and the historical image only.
 
-	// Phase A: ensure the original pod is actually gone from this ServingGroup (or at least not present anymore).
+	// Phase A: ensure the original pod is actually gone from the ModelServing (not just this group).
 	require.Eventually(t, func() bool {
 		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
+			LabelSelector: msSelector,
 		})
 		if err != nil {
 			return false
 		}
 		for _, pod := range pods.Items {
 			if pod.UID == originalUID {
-				logServingGroupPods(t, ctx, kubeClient, labelSelector, "waiting original pod to disappear")
+				logServingGroupPods(t, ctx, kubeClient, groupSelector, "waiting original pod to disappear (group selector)")
+				logServingGroupPods(t, ctx, kubeClient, msSelector, "waiting original pod to disappear (ms selector)")
 				return false
 			}
 		}
 		return true
 	}, 2*time.Minute, 2*time.Second, "Original pod did not disappear after deletion request")
 
-	// Phase B: wait for a replacement pod that is Ready and still uses the historical image.
+	// Phase B: wait for the partition state to recover and confirm protected groups still use the historical image.
+	// NOTE: We intentionally do not wait on the original group-name selector here. In practice the controller
+	// can recreate a deleted ServingGroup with a different ordinal/group-name (ordinals are not guaranteed dense
+	// or stable). The contract we want is: protected zone remains on historical revision after recovery.
 	require.Eventually(t, func() bool {
+		protectedCorrect, updatedCorrect := verifyPartitionState(t, ctx, kubeClient, modelServing.Name, partition, replicas)
+		if protectedCorrect != int(partition) || updatedCorrect != int(replicas-partition) {
+			t.Logf("Partition not yet recovered: Protected: %d/%d, Updated: %d/%d", protectedCorrect, partition, updatedCorrect, replicas-partition)
+			logPartitionPodInventory(t, ctx, kubeClient, modelServing.Name, replicas, partition)
+			return false
+		}
+
+		// Additionally, confirm there exists at least one Ready pod in the protected zone using historical image
+		// whose UID differs from the deleted pod (to ensure we truly observed post-delete state).
 		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
+			LabelSelector: msSelector,
 		})
 		if err != nil || len(pods.Items) == 0 {
-			logServingGroupPods(t, ctx, kubeClient, labelSelector, "waiting replacement pod (list empty)")
+			logServingGroupPods(t, ctx, kubeClient, msSelector, "waiting partition recovery (ms selector list empty)")
 			return false
 		}
 
 		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.UID == originalUID {
+			if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || len(pod.Spec.Containers) == 0 {
 				continue
 			}
-			if pod.Status.Phase != corev1.PodRunning {
+			gn := pod.Labels[workload.GroupNameLabelKey]
+			if gn == "" {
+				continue
+			}
+			parent, ord := servingctrlutils.GetParentNameAndOrdinal(gn)
+			if parent != modelServing.Name || ord < 0 || int32(ord) >= partition {
 				continue
 			}
 			ready := false
@@ -1415,19 +1436,15 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 			if !ready {
 				continue
 			}
-			hasHistorical := false
-			for _, container := range pod.Spec.Containers {
-				if e2eImageRefEquivalent(container.Image, nginxImage) {
-					hasHistorical = true
-					break
-				}
+			if pod.UID == originalUID {
+				continue
 			}
-			if hasHistorical {
-				t.Logf("Recreated pod %s is Ready and uses historical image", pod.Name)
+			if e2eImageRefEquivalent(pod.Spec.Containers[0].Image, nginxImage) {
+				t.Logf("Observed protected-zone Ready pod %s (ordinal %d) using historical image after deletion", pod.Name, ord)
 				return true
 			}
 		}
-		logServingGroupPods(t, ctx, kubeClient, labelSelector, "waiting replacement pod ready+historical")
+		logPartitionPodInventory(t, ctx, kubeClient, modelServing.Name, replicas, partition)
 		return false
 	}, 5*time.Minute, 2*time.Second, "Recreated pod should use historical revision")
 
