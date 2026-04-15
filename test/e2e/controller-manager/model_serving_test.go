@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1266,6 +1268,7 @@ func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 	require.NoError(t, err)
 	initialRevision := initialMS.Status.CurrentRevision
 	t.Logf("Initial CurrentRevision: %s", initialMS.Status.CurrentRevision)
+	require.NotEmpty(t, initialRevision, "Initial CurrentRevision should be set")
 
 	updatedMS := initialMS.DeepCopy()
 	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
@@ -1275,21 +1278,8 @@ func TestModelServingPartitionBoundaryProtection(t *testing.T) {
 	require.NoError(t, err)
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
-	// Wait for partition state to converge (both status and actual pod images)
-	require.Eventually(t, func() bool {
-		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		protectedCorrect, updatedCorrect := verifyPartitionState(t, ctx, kubeClient, modelServing.Name, partition, replicas)
-		t.Logf("CurrentRevision: %s, UpdateRevision: %s, Protected: %d/%d, Updated: %d/%d",
-			ms.Status.CurrentRevision, ms.Status.UpdateRevision, protectedCorrect, partition, updatedCorrect, replicas-partition)
-		return ms.Status.CurrentRevision == initialRevision &&
-			ms.Status.UpdateRevision != "" &&
-			ms.Status.UpdateRevision != initialRevision &&
-			protectedCorrect == int(partition) &&
-			updatedCorrect == int(replicas-partition)
-	}, 3*time.Minute, 2*time.Second, "Partition state did not converge")
+	updateRevision := waitForPartitionState(t, ctx, kthenaClient, kubeClient, modelServing.Name, partition, replicas, initialRevision)
+	assert.NotEqual(t, initialRevision, updateRevision)
 }
 
 // TestModelServingPartitionDeletedGroupHistoricalRevision verifies deleted groups
@@ -1309,7 +1299,9 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err)
-	t.Logf("Initial CurrentRevision: %s", initialMS.Status.CurrentRevision)
+	initialRevision := initialMS.Status.CurrentRevision
+	t.Logf("Initial CurrentRevision: %s", initialRevision)
+	require.NotEmpty(t, initialRevision, "Initial CurrentRevision should be set")
 
 	updatedMS := initialMS.DeepCopy()
 	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
@@ -1319,12 +1311,7 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	require.NoError(t, err)
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
-	// Wait for partition state to converge
-	require.Eventually(t, func() bool {
-		protectedCorrect, updatedCorrect := verifyPartitionState(t, ctx, kubeClient, modelServing.Name, partition, replicas)
-		t.Logf("Protected: %d/%d, Updated: %d/%d", protectedCorrect, partition, updatedCorrect, replicas-partition)
-		return protectedCorrect == int(partition) && updatedCorrect == int(replicas-partition)
-	}, 3*time.Minute, 2*time.Second, "Partition state did not converge")
+	updateRevision := waitForPartitionState(t, ctx, kthenaClient, kubeClient, modelServing.Name, partition, replicas, initialRevision)
 	t.Log("Partitioned update established")
 
 	targetOrdinal := 1
@@ -1338,7 +1325,7 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	require.NotEmpty(t, pods.Items)
 
 	podToDelete := pods.Items[0]
-	originalUID := podToDelete.UID
+	originalUID := string(podToDelete.UID)
 	t.Logf("Deleting pod %s (ordinal %d)", podToDelete.Name, targetOrdinal)
 
 	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, podToDelete.Name, metav1.DeleteOptions{})
@@ -1347,33 +1334,30 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
 	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil || len(pods.Items) == 0 {
+		ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, modelServing.Name)
+		if err != nil {
+			t.Logf("Failed to collect serving group states: %v", err)
 			return false
 		}
-
-		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.UID == originalUID {
-				continue
-			}
-			if pod.Status.Phase != corev1.PodRunning {
-				continue
-			}
-			for _, container := range pod.Spec.Containers {
-				if container.Image == nginxImage {
-					t.Logf("Recreated pod %s uses historical image", pod.Name)
-					return true
-				}
-			}
+		state, ok := ordinalStates[int32(targetOrdinal)]
+		if !ok {
+			return false
 		}
-		return false
+		t.Logf("Recreated protected ordinal %d => group=%s pod=%s revision=%s image=%s", targetOrdinal, state.GroupName, state.PodName, state.Revision, state.Image)
+		return state.PodUID != originalUID &&
+			state.Revision == initialRevision &&
+			state.Image == nginxImage
 	}, 3*time.Minute, 2*time.Second, "Recreated pod should use historical revision")
 
-	protectedCorrect, updatedCorrect := verifyPartitionState(t, ctx, kubeClient, modelServing.Name, partition, replicas)
+	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, modelServing.Name)
+	require.NoError(t, err)
+	protectedCorrect, updatedCorrect := verifyPartitionState(t, ordinalStates, partition, replicas, initialRevision, updateRevision)
 	assert.Equal(t, int(partition), protectedCorrect)
 	assert.Equal(t, int(replicas-partition), updatedCorrect)
+	assert.Equal(t, initialRevision, finalMS.Status.CurrentRevision)
+	assert.Equal(t, updateRevision, finalMS.Status.UpdateRevision)
 }
 
 // TestModelServingRollingUpdate verifies rolling updates without partition.
@@ -1382,7 +1366,7 @@ func TestModelServingRollingUpdate(t *testing.T) {
 
 	const replicas = int32(3)
 
-	modelServing := createBasicModelServing("test-rolling-update", replicas)
+	modelServing := createBasicModelServing("test-rolling-update", replicas, 0)
 	t.Logf("Creating ModelServing with %d replicas", replicas)
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
@@ -1406,9 +1390,18 @@ func TestModelServingRollingUpdate(t *testing.T) {
 
 	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err)
+	require.NotEmpty(t, finalMS.Status.UpdateRevision, "UpdateRevision should be set after rollout")
 
 	assert.Equal(t, finalMS.Status.CurrentRevision, finalMS.Status.UpdateRevision)
 	assert.NotEqual(t, initialRevision, finalMS.Status.UpdateRevision)
+
+	ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, modelServing.Name)
+	require.NoError(t, err)
+	require.Len(t, ordinalStates, int(replicas), "Expected one running group per replica after rollout")
+	for ordinal, state := range ordinalStates {
+		assert.Equalf(t, finalMS.Status.UpdateRevision, state.Revision, "Ordinal %d should use UpdateRevision without partition", ordinal)
+		assert.Equalf(t, nginxAlpineImage, state.Image, "Ordinal %d should run the updated image without partition", ordinal)
+	}
 	t.Logf("Rolling update completed - CurrentRevision: %s", finalMS.Status.CurrentRevision)
 }
 
@@ -1457,35 +1450,114 @@ func createPartitionedModelServing(name string, replicas, partition int32) *work
 	}
 }
 
-func verifyPartitionState(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset,
-	msName string, partition, replicas int32) (protectedCorrect, updatedCorrect int) {
-	t.Helper()
-	for ordinal := int32(0); ordinal < replicas; ordinal++ {
-		groupName := fmt.Sprintf("%s-%d", msName, ordinal)
-		labelSelector := fmt.Sprintf("modelserving.volcano.sh/group-name=%s", groupName)
+type servingGroupState struct {
+	GroupName string
+	PodName   string
+	PodUID    string
+	Ordinal   int32
+	Revision  string
+	Image     string
+}
 
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil || len(pods.Items) == 0 {
+func collectRunningServingGroupStates(ctx context.Context, kubeClient *kubernetes.Clientset, msName string) (map[int32]servingGroupState, error) {
+	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: modelServingLabelSelector(msName),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	states := make(map[int32]servingGroupState)
+	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		groupName := pod.Labels[workload.GroupNameLabelKey]
+		if groupName == "" {
+			continue
+		}
+		ordinal, ok := parseServingGroupOrdinal(groupName, msName)
+		if !ok {
+			continue
+		}
+		revision := pod.Labels[workload.RevisionLabelKey]
+		if revision == "" || len(pod.Spec.Containers) == 0 {
 			continue
 		}
 
-		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
-				continue
-			}
+		state := servingGroupState{
+			GroupName: groupName,
+			PodName:   pod.Name,
+			PodUID:    string(pod.UID),
+			Ordinal:   int32(ordinal),
+			Revision:  revision,
+			Image:     pod.Spec.Containers[0].Image,
+		}
+		if existing, ok := states[state.Ordinal]; !ok || state.PodName < existing.PodName {
+			states[state.Ordinal] = state
+		}
+	}
 
-			for _, container := range pod.Spec.Containers {
-				isProtected := ordinal < partition
-				if isProtected && container.Image == nginxImage {
-					protectedCorrect++
-				} else if !isProtected && container.Image == nginxAlpineImage {
-					updatedCorrect++
-				}
-				break // Only check first container
-			}
-			break // Only check first non-terminating running pod
+	return states, nil
+}
+
+func parseServingGroupOrdinal(groupName, msName string) (int, bool) {
+	prefix := msName + "-"
+	if !strings.HasPrefix(groupName, prefix) {
+		return 0, false
+	}
+	ordinal, err := strconv.Atoi(strings.TrimPrefix(groupName, prefix))
+	if err != nil {
+		return 0, false
+	}
+	return ordinal, true
+}
+
+func waitForPartitionState(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset,
+	kubeClient *kubernetes.Clientset, msName string, partition, replicas int32, initialRevision string) string {
+	t.Helper()
+
+	var updateRevision string
+	require.Eventually(t, func() bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, msName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, msName)
+		if err != nil {
+			t.Logf("Failed to collect serving group states: %v", err)
+			return false
+		}
+		protectedCorrect, updatedCorrect := verifyPartitionState(t, ordinalStates, partition, replicas, initialRevision, ms.Status.UpdateRevision)
+		t.Logf("CurrentRevision: %s, UpdateRevision: %s, Protected: %d/%d, Updated: %d/%d",
+			ms.Status.CurrentRevision, ms.Status.UpdateRevision, protectedCorrect, partition, updatedCorrect, replicas-partition)
+		if ms.Status.CurrentRevision != initialRevision ||
+			ms.Status.UpdateRevision == "" ||
+			ms.Status.UpdateRevision == initialRevision ||
+			protectedCorrect != int(partition) ||
+			updatedCorrect != int(replicas-partition) {
+			return false
+		}
+		updateRevision = ms.Status.UpdateRevision
+		return true
+	}, 3*time.Minute, 2*time.Second, "Partition state did not converge")
+
+	return updateRevision
+}
+
+func verifyPartitionState(t *testing.T, ordinalStates map[int32]servingGroupState,
+	partition, replicas int32, currentRevision, updateRevision string) (protectedCorrect, updatedCorrect int) {
+	t.Helper()
+	for ordinal := int32(0); ordinal < replicas; ordinal++ {
+		state, ok := ordinalStates[ordinal]
+		if !ok {
+			continue
+		}
+		isProtected := ordinal < partition
+		if isProtected && state.Revision == currentRevision && state.Image == nginxImage {
+			protectedCorrect++
+		} else if !isProtected && state.Revision == updateRevision && state.Image == nginxAlpineImage {
+			updatedCorrect++
 		}
 	}
 	return
