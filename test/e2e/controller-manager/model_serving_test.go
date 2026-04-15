@@ -1348,8 +1348,22 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 
 	originalUID := podToDelete.UID
 	t.Logf("Deleting pod %s (ordinal %d group=%s)", podToDelete.Name, pickedOrd, targetGroupName)
+	logServingGroupPods(t, ctx, kubeClient, labelSelector, "before delete")
 
-	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, podToDelete.Name, metav1.DeleteOptions{})
+	// Use a dedicated, bounded context for DELETE to avoid indefinite hangs when apiserver/network is unhealthy.
+	// Also request immediate deletion to reduce time spent in Terminating.
+	deleteCtx, cancelDelete := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancelDelete()
+	zero := int64(0)
+	bg := metav1.DeletePropagationBackground
+	err = kubeClient.CoreV1().Pods(testNamespace).Delete(deleteCtx, podToDelete.Name, metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+		PropagationPolicy:  &bg,
+	})
+	if err != nil {
+		t.Logf("Pod delete returned error: %v", err)
+		logServingGroupPods(t, ctx, kubeClient, labelSelector, "after delete error")
+	}
 	require.NoError(t, err)
 
 	// Do not call WaitForModelServingReady here: it only checks Status.AvailableReplicas >= Spec.Replicas.
@@ -1357,11 +1371,30 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 	// a 5-minute poll and (with package -timeout) apparent hangs. The assertion below is scoped to this
 	// ServingGroup and the historical image only.
 
+	// Phase A: ensure the original pod is actually gone from this ServingGroup (or at least not present anymore).
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
+		if err != nil {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if pod.UID == originalUID {
+				logServingGroupPods(t, ctx, kubeClient, labelSelector, "waiting original pod to disappear")
+				return false
+			}
+		}
+		return true
+	}, 2*time.Minute, 2*time.Second, "Original pod did not disappear after deletion request")
+
+	// Phase B: wait for a replacement pod that is Ready and still uses the historical image.
 	require.Eventually(t, func() bool {
 		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
 			LabelSelector: labelSelector,
 		})
 		if err != nil || len(pods.Items) == 0 {
+			logServingGroupPods(t, ctx, kubeClient, labelSelector, "waiting replacement pod (list empty)")
 			return false
 		}
 
@@ -1372,13 +1405,29 @@ func TestModelServingPartitionDeletedGroupHistoricalRevision(t *testing.T) {
 			if pod.Status.Phase != corev1.PodRunning {
 				continue
 			}
-			for _, container := range pod.Spec.Containers {
-				if e2eImageRefEquivalent(container.Image, nginxImage) {
-					t.Logf("Recreated pod %s uses historical image", pod.Name)
-					return true
+			ready := false
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+					ready = true
+					break
 				}
 			}
+			if !ready {
+				continue
+			}
+			hasHistorical := false
+			for _, container := range pod.Spec.Containers {
+				if e2eImageRefEquivalent(container.Image, nginxImage) {
+					hasHistorical = true
+					break
+				}
+			}
+			if hasHistorical {
+				t.Logf("Recreated pod %s is Ready and uses historical image", pod.Name)
+				return true
+			}
 		}
+		logServingGroupPods(t, ctx, kubeClient, labelSelector, "waiting replacement pod ready+historical")
 		return false
 	}, 5*time.Minute, 2*time.Second, "Recreated pod should use historical revision")
 
@@ -1549,6 +1598,49 @@ func containerStateString(st corev1.ContainerState) string {
 	default:
 		return "Unknown"
 	}
+}
+
+// logServingGroupPods prints pods matched by labelSelector with both spec and status image/ready/state.
+// This is used to debug flaky/hung e2e behavior around deletion and replacement.
+func logServingGroupPods(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, labelSelector, phase string) {
+	t.Helper()
+	t.Logf("--- servingGroup pod inventory (%s) selector=%q ---", phase, labelSelector)
+	pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		t.Logf("LIST ERROR: %v", err)
+		t.Logf("--- end servingGroup pod inventory ---")
+		return
+	}
+	if len(pods.Items) == 0 {
+		t.Log("no pods found")
+		t.Logf("--- end servingGroup pod inventory ---")
+		return
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		specImgs := make([]string, 0, len(p.Spec.Containers))
+		for _, c := range p.Spec.Containers {
+			specImgs = append(specImgs, fmt.Sprintf("%s->%s", c.Name, c.Image))
+		}
+		stLines := make([]string, 0, len(p.Status.ContainerStatuses))
+		for _, cs := range p.Status.ContainerStatuses {
+			stLines = append(stLines, fmt.Sprintf("%s:image=%s ready=%v restart=%d state=%s",
+				cs.Name, cs.Image, cs.Ready, cs.RestartCount, containerStateString(cs.State)))
+		}
+		ready := false
+		for _, cond := range p.Status.Conditions {
+			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+				ready = true
+				break
+			}
+		}
+		t.Logf("  pod name=%s uid=%s phase=%s ready=%v node=%s deleting=%v spec=[%s] status=[%s]",
+			p.Name, p.UID, p.Status.Phase, ready, p.Spec.NodeName, p.DeletionTimestamp != nil,
+			strings.Join(specImgs, ", "), strings.Join(stLines, "; "))
+	}
+	t.Logf("--- end servingGroup pod inventory ---")
 }
 
 // verifyPartitionState counts ServingGroups by parsed group-name ordinal (not dense 0..replicas-1).
