@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	lwsutils "sigs.k8s.io/lws/pkg/utils"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -1206,6 +1207,20 @@ func TestLWSAPIBasic(t *testing.T) {
 		}
 	}
 	assert.Equal(t, expectedPodCount, readyPods, "All pods should be in a Ready state")
+
+	// Verify LWS standard labels are injected by kthena plugin
+	expectedGroupIndex := "0"
+	expectedGroupKey := lwsutils.Sha1Hash(lwsName + "-0")
+	expectedWorkerIndexSet := map[string]bool{"0": true, "1": true}
+	for _, pod := range podList.Items {
+		assert.Equal(t, lwsName, pod.Labels[lwsv1.SetNameLabelKey], "pod %s should have LWS name label", pod.Name)
+		assert.Equal(t, expectedGroupIndex, pod.Labels[lwsv1.GroupIndexLabelKey], "pod %s should have LWS group-index label", pod.Name)
+
+		workerIndex := pod.Labels[lwsv1.WorkerIndexLabelKey]
+		assert.True(t, expectedWorkerIndexSet[workerIndex], "pod %s should have LWS worker-index label in {0,1}, got %q", pod.Name, workerIndex)
+
+		assert.Equal(t, expectedGroupKey, pod.Labels[lwsv1.GroupUniqueHashLabelKey], "pod %s should have correct LWS group-key label", pod.Name)
+	}
 
 	// Delete the LWS instance
 	t.Logf("Deleting LWS instance: %s/%s", testNamespace, lwsName)
