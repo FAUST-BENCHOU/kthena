@@ -1387,47 +1387,7 @@ func TestModelServingRollingUpdate(t *testing.T) {
 
 	verifyAllPodsHaveImage(t, ctx, kubeClient, labelSelector, nginxAlpineImage, "after update")
 
-	// Poll until the rolling update has fully converged. ServingGroupRollingUpdate creates
-	// new groups at maxOrdinal+1 and deletes old ones, so ordinals shift during the rollout
-	// and Status.AvailableReplicas alone can transiently reach the desired count before the
-	// controller has finished creating the final group. Assert on the steady state instead.
-	var finalMS *workload.ModelServing
-	require.Eventually(t, func() bool {
-		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		if ms.Status.UpdateRevision == "" ||
-			ms.Status.UpdateRevision == initialRevision ||
-			ms.Status.CurrentRevision != ms.Status.UpdateRevision {
-			return false
-		}
-		if ms.Status.Replicas != replicas ||
-			ms.Status.AvailableReplicas != replicas ||
-			ms.Status.UpdatedReplicas != replicas {
-			t.Logf("Replicas: %d, AvailableReplicas: %d, UpdatedReplicas: %d (expecting %d)",
-				ms.Status.Replicas, ms.Status.AvailableReplicas, ms.Status.UpdatedReplicas, replicas)
-			return false
-		}
-		ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, modelServing.Name)
-		if err != nil {
-			t.Logf("Failed to collect serving group states: %v", err)
-			return false
-		}
-		if len(ordinalStates) != int(replicas) {
-			t.Logf("Running serving group count: %d (expecting %d)", len(ordinalStates), replicas)
-			return false
-		}
-		for ordinal, state := range ordinalStates {
-			if state.Revision != ms.Status.UpdateRevision || state.Image != nginxAlpineImage {
-				t.Logf("Ordinal %d not on UpdateRevision yet: revision=%s image=%s", ordinal, state.Revision, state.Image)
-				return false
-			}
-		}
-		finalMS = ms
-		return true
-	}, 3*time.Minute, 2*time.Second, "Rolling update did not converge")
-
+	finalMS := waitForRollingUpdateConverged(t, ctx, kthenaClient, kubeClient, modelServing.Name, replicas, initialRevision, nginxAlpineImage)
 	t.Logf("Rolling update completed - CurrentRevision: %s", finalMS.Status.CurrentRevision)
 }
 
@@ -1561,6 +1521,55 @@ func waitForPartitionState(t *testing.T, ctx context.Context, kthenaClient *clie
 	}, 3*time.Minute, 2*time.Second, "Partition state did not converge")
 
 	return updateRevision
+}
+
+// waitForRollingUpdateConverged polls until a rolling update without partition has fully converged:
+// CurrentRevision has caught up to UpdateRevision, status counters match Spec.Replicas, and every
+// running serving group is on UpdateRevision with the updated image. Ordinals are not checked because
+// ServingGroupRollingUpdate creates new groups at maxOrdinal+1 and deletes old ones, so indices shift
+// during the rollout.
+func waitForRollingUpdateConverged(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset,
+	kubeClient *kubernetes.Clientset, msName string, replicas int32, initialRevision, updatedImage string) *workload.ModelServing {
+	t.Helper()
+
+	var finalMS *workload.ModelServing
+	require.Eventually(t, func() bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, msName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		if ms.Status.UpdateRevision == "" ||
+			ms.Status.UpdateRevision == initialRevision ||
+			ms.Status.CurrentRevision != ms.Status.UpdateRevision {
+			return false
+		}
+		if ms.Status.Replicas != replicas ||
+			ms.Status.AvailableReplicas != replicas ||
+			ms.Status.UpdatedReplicas != replicas {
+			t.Logf("Replicas: %d, AvailableReplicas: %d, UpdatedReplicas: %d (expecting %d)",
+				ms.Status.Replicas, ms.Status.AvailableReplicas, ms.Status.UpdatedReplicas, replicas)
+			return false
+		}
+		ordinalStates, err := collectRunningServingGroupStates(ctx, kubeClient, msName)
+		if err != nil {
+			t.Logf("Failed to collect serving group states: %v", err)
+			return false
+		}
+		if len(ordinalStates) != int(replicas) {
+			t.Logf("Running serving group count: %d (expecting %d)", len(ordinalStates), replicas)
+			return false
+		}
+		for ordinal, state := range ordinalStates {
+			if state.Revision != ms.Status.UpdateRevision || state.Image != updatedImage {
+				t.Logf("Ordinal %d not on UpdateRevision yet: revision=%s image=%s", ordinal, state.Revision, state.Image)
+				return false
+			}
+		}
+		finalMS = ms
+		return true
+	}, 3*time.Minute, 2*time.Second, "Rolling update did not converge")
+
+	return finalMS
 }
 
 func verifyPartitionState(t *testing.T, ordinalStates map[int32]servingGroupState,
