@@ -100,6 +100,25 @@ In Go/OpenAPI terms, **`sessionSticky` is a pointer to `SessionStickySpec`** (JS
 | `sessionAffinitySeconds` | TTL for the binding; optional, default **10800**; minimum **1** when set. |
 | `sources` | Ordered list (max **16**) of **`SessionKeySource`**: **`type`** (`Header`, `Query`, `Cookie`, `JWTClaim`) and **`name`** (header name, query key, cookie name, or claim name). **Required and non-empty when `sessionSticky` is non-nil** (enforced by validation). |
 
+```
+const (
+	SessionKeySourceHeader   SessionKeySourceType = "Header"
+	SessionKeySourceQuery    SessionKeySourceType = "Query"
+	SessionKeySourceCookie   SessionKeySourceType = "Cookie"
+	SessionKeySourceJWTClaim SessionKeySourceType = "JWTClaim"
+)
+
+// SessionKeySource defines one session key extraction rule.
+type SessionKeySource struct {
+	// Type of extraction.
+	// +kubebuilder:validation:Required
+	Type SessionKeySourceType `json:"type"`
+	// Name is the HTTP header name, query parameter name, cookie name, or JWT claim name.
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+}
+```
+
 **Router process configuration (not `ModelRoute`)** — choose mapping backend and optional Redis, e.g. flags such as:
 
 | Concern | Notes |
