@@ -175,6 +175,7 @@ _Appears in:_
 | `parentRefs` _ParentReference array_ | ParentRefs references the Gateways that this ModelRoute should be attached to.<br />If empty, the ModelRoute will be attached to all Gateways in the same namespace. |  |  |
 | `rules` _[Rule](#rule) array_ | An ordered list of route rules for LLM traffic. The first rule<br />matching an incoming request will be used.<br />If no rule is matched, an HTTP 404 status code MUST be returned. |  | MaxItems: 16 <br /> |
 | `rateLimit` _[RateLimit](#ratelimit)_ | Rate limit for the LLM request based on prompt tokens or output tokens.<br />There is no limitation if this field is not set. |  |  |
+| `sessionSticky` _[SessionSticky](#sessionsticky)_ | SessionSticky configures session affinity so requests with the same session key<br />are routed to the same model server Pod (aggregated mode only; ignored for PD disaggregation). |  |  |
 
 
 #### ModelRouteStatus
@@ -329,6 +330,7 @@ RedisConfig contains Redis connection configuration
 
 _Appears in:_
 - [GlobalRateLimit](#globalratelimit)
+- [SessionSticky](#sessionsticky)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -367,6 +369,81 @@ _Appears in:_
 | `name` _string_ | Name is the name of the rule. |  |  |
 | `modelMatch` _[ModelMatch](#modelmatch)_ | Match conditions to be satisfied for the rule to be activated.<br />Empty `modelMatch` means matching all requests. |  |  |
 | `targetModels` _[TargetModel](#targetmodel) array_ |  |  | MaxItems: 16 <br />MinItems: 1 <br /> |
+
+
+#### SessionKeySource
+
+
+
+SessionKeySource defines one session key extraction rule.
+
+
+
+_Appears in:_
+- [SessionSticky](#sessionsticky)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _[SessionKeySourceType](#sessionkeysourcetype)_ | Type of extraction. |  | Enum: [Header Query Cookie JWTClaim] <br />Required: \{\} <br /> |
+| `name` _string_ | Name is the HTTP header name, query parameter name, cookie name, or JWT claim name. |  | Required: \{\} <br /> |
+
+
+#### SessionKeySourceType
+
+_Underlying type:_ _string_
+
+SessionKeySourceType identifies how a session key is extracted from a request.
+
+_Validation:_
+- Enum: [Header Query Cookie JWTClaim]
+
+_Appears in:_
+- [SessionKeySource](#sessionkeysource)
+
+| Field | Description |
+| --- | --- |
+| `Header` |  |
+| `Query` |  |
+| `Cookie` |  |
+| `JWTClaim` |  |
+
+
+#### SessionSticky
+
+
+
+SessionSticky configures gateway-side session-to-Pod affinity.
+
+
+
+_Appears in:_
+- [ModelRouteSpec](#modelroutespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled turns on session sticky routing for this ModelRoute. |  |  |
+| `sessionAffinitySeconds` _integer_ | SessionAffinitySeconds is the TTL for the session-to-pod binding.<br />Defaults to 10800 (3 hours) when unset. |  | Minimum: 1 <br /> |
+| `backend` _[SessionStickyBackend](#sessionstickybackend)_ | Backend selects where session mappings are stored.<br />Defaults to Memory when unset. |  | Enum: [Memory Redis] <br /> |
+| `redis` _[RedisConfig](#redisconfig)_ | Redis is required when Backend is Redis. |  |  |
+| `sources` _[SessionKeySource](#sessionkeysource) array_ | Sources lists session key extractors in order; the first non-empty value wins. |  | MaxItems: 16 <br /> |
+
+
+#### SessionStickyBackend
+
+_Underlying type:_ _string_
+
+SessionStickyBackend is the backing store for session mappings.
+
+_Validation:_
+- Enum: [Memory Redis]
+
+_Appears in:_
+- [SessionSticky](#sessionsticky)
+
+| Field | Description |
+| --- | --- |
+| `Memory` |  |
+| `Redis` |  |
 
 
 #### StringMatch

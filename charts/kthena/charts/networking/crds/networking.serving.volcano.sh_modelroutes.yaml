@@ -347,6 +347,70 @@ spec:
                   type: object
                 maxItems: 16
                 type: array
+              sessionSticky:
+                description: |-
+                  SessionSticky configures session affinity so requests with the same session key
+                  are routed to the same model server Pod (aggregated mode only; ignored for PD disaggregation).
+                properties:
+                  backend:
+                    allOf:
+                    - enum:
+                      - Memory
+                      - Redis
+                    - enum:
+                      - Memory
+                      - Redis
+                    description: |-
+                      Backend selects where session mappings are stored.
+                      Defaults to Memory when unset.
+                    type: string
+                  enabled:
+                    description: Enabled turns on session sticky routing for this
+                      ModelRoute.
+                    type: boolean
+                  redis:
+                    description: Redis is required when Backend is Redis.
+                    properties:
+                      address:
+                        description: Address is the Redis server address in the format
+                          "host:port".
+                        type: string
+                    required:
+                    - address
+                    type: object
+                  sessionAffinitySeconds:
+                    description: |-
+                      SessionAffinitySeconds is the TTL for the session-to-pod binding.
+                      Defaults to 10800 (3 hours) when unset.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  sources:
+                    description: Sources lists session key extractors in order; the
+                      first non-empty value wins.
+                    items:
+                      description: SessionKeySource defines one session key extraction
+                        rule.
+                      properties:
+                        name:
+                          description: Name is the HTTP header name, query parameter
+                            name, cookie name, or JWT claim name.
+                          type: string
+                        type:
+                          description: Type of extraction.
+                          enum:
+                          - Header
+                          - Query
+                          - Cookie
+                          - JWTClaim
+                          type: string
+                      required:
+                      - name
+                      - type
+                      type: object
+                    maxItems: 16
+                    type: array
+                type: object
             required:
             - rules
             type: object

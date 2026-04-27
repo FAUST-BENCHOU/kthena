@@ -106,6 +106,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 	}
 
 	if ctx.PDGroup != nil {
+		// TODO(FAUST-BENCHOU): Session sticky applies to aggregated mode only; PD disaggregation ignores StickyPodName.
 		// Use optimized PDGroup scheduling with pre-categorized pods from store
 		klog.V(4).Info("Using optimized PD disaggregated scheduling")
 
@@ -155,6 +156,22 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			return fmt.Errorf("no valid prefill-decode pod pairs found")
 		}
 		return nil
+	}
+
+	// Aggregated mode: pin to sticky pod when it survived filtering.
+	if ctx.StickyPodName != "" {
+		for _, p := range pods {
+			if p.Pod != nil && p.Pod.Name == ctx.StickyPodName {
+				scores := s.RunScorePlugins([]*datastore.PodInfo{p}, ctx)
+				ctx.BestPods = TopNPodInfos(scores, topN)
+				if len(ctx.BestPods) > 0 {
+					return nil
+				}
+				break
+			}
+		}
+		ctx.StickyPodName = ""
+		klog.V(2).Info("session sticky: mapped pod not in filtered set, falling back to normal schedule")
 	}
 
 	klog.V(4).Info("Running score plugins for PD aggregated pod")

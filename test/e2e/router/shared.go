@@ -121,7 +121,7 @@ func matchLabels(metricLabels []*dto.LabelPair, wantLabels map[string]string) bo
 	return true
 }
 
-func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
+func EnsureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string) func() {
 	t.Helper()
 	ctx := context.Background()
 
@@ -198,7 +198,7 @@ func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string
 	}
 }
 
-func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namespace string, replicas int32) func() {
+func ScaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namespace string, replicas int32) func() {
 	t.Helper()
 	ctx := context.Background()
 	const deploymentName = "kthena-router"
@@ -234,7 +234,7 @@ func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namesp
 	}
 }
 
-func getRouterPods(t *testing.T, kubeClient kubernetes.Interface, namespace string) []corev1.Pod {
+func GetRouterPods(t *testing.T, kubeClient kubernetes.Interface, namespace string) []corev1.Pod {
 	t.Helper()
 	ctx := context.Background()
 	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, "kthena-router", metav1.GetOptions{})
@@ -266,8 +266,8 @@ func getRouterPods(t *testing.T, kubeClient kubernetes.Interface, namespace stri
 	return readyPods
 }
 
-// setupModelRouteWithGatewayAPI configures ModelRoute with ParentRefs to default Gateway if useGatewayAPI is true.
-func setupModelRouteWithGatewayAPI(modelRoute *networkingv1alpha1.ModelRoute, useGatewayAPI bool, kthenaNamespace string) {
+// SetupModelRouteWithGatewayAPI configures ModelRoute with ParentRefs to default Gateway if useGatewayAPI is true.
+func SetupModelRouteWithGatewayAPI(modelRoute *networkingv1alpha1.ModelRoute, useGatewayAPI bool, kthenaNamespace string) {
 	if useGatewayAPI {
 		ktNamespace := gatewayv1.Namespace(kthenaNamespace)
 		if len(modelRoute.Spec.ParentRefs) > 0 {
@@ -300,7 +300,7 @@ func TestModelRouteSimpleShared(t *testing.T, testCtx *routercontext.RouterTestC
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
-	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+	SetupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
 
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
@@ -349,7 +349,7 @@ func TestModelRouteMultiModelsShared(t *testing.T, testCtx *routercontext.Router
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
-	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+	SetupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
 
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
@@ -459,7 +459,7 @@ func TestModelRoutePrefillDecodeDisaggregationShared(t *testing.T, testCtx *rout
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
-	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+	SetupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
 
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
@@ -566,7 +566,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
-	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+	SetupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
 
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
@@ -739,7 +739,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		if modelRoute.Spec.RateLimit != nil {
 			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
 		}
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		SetupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")
@@ -801,7 +801,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		if modelRoute.Spec.RateLimit != nil {
 			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
 		}
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		SetupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")
@@ -870,7 +870,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		if modelRoute.Spec.RateLimit != nil {
 			modelRoute.Spec.RateLimit.OutputTokensPerUnit = nil
 		}
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		SetupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")
@@ -936,7 +936,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 
 		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteWithRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		SetupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 		require.NoError(t, err, "Failed to create ModelRoute")
@@ -1013,10 +1013,10 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 	)
 	ctx := context.Background()
 
-	redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
+	redisCleanup := EnsureRedis(t, testCtx.KubeClient, kthenaNamespace)
 	t.Cleanup(redisCleanup)
 
-	scaleCleanup := scaleRouterDeployment(t, testCtx.KubeClient, kthenaNamespace, 3)
+	scaleCleanup := ScaleRouterDeployment(t, testCtx.KubeClient, kthenaNamespace, 3)
 	t.Cleanup(scaleCleanup)
 
 	standardMessage := []utils.ChatMessage{
@@ -1037,7 +1037,7 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 				modelRoute.Spec.RateLimit.Global.Redis.Address = redisAddr
 			}
 		}
-		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+		SetupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
 		return modelRoute
 	}
 
@@ -1089,7 +1089,7 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		pods := getRouterPods(t, testCtx.KubeClient, kthenaNamespace)
+		pods := GetRouterPods(t, testCtx.KubeClient, kthenaNamespace)
 		require.GreaterOrEqual(t, len(pods), 3, "Need at least three router pods for global sharing test")
 
 		pf1, err := utils.SetupPortForwardToPod(kthenaNamespace, pods[0].Name, "18080", "8080")
@@ -1218,7 +1218,7 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 	modelRoute.Namespace = testNamespace
 
 	// Configure ParentRefs if using Gateway API
-	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+	SetupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
 
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
@@ -1341,7 +1341,7 @@ func TestModelRouteDuplicatePreferOldestShared(t *testing.T, testCtx *routercont
 			},
 		},
 	}
-	setupModelRouteWithGatewayAPI(prebuiltRoute, useGatewayAPI, kthenaNamespace)
+	SetupModelRouteWithGatewayAPI(prebuiltRoute, useGatewayAPI, kthenaNamespace)
 	createdPrebuilt, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, prebuiltRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create prebuilt ModelRoute")
 	t.Logf("Created ModelRoute: %s/%s (oldest)", createdPrebuilt.Namespace, createdPrebuilt.Name)
@@ -1372,7 +1372,7 @@ func TestModelRouteDuplicatePreferOldestShared(t *testing.T, testCtx *routercont
 			},
 		},
 	}
-	setupModelRouteWithGatewayAPI(newerRoute, useGatewayAPI, kthenaNamespace)
+	SetupModelRouteWithGatewayAPI(newerRoute, useGatewayAPI, kthenaNamespace)
 	createdNewer, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, newerRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create newer ModelRoute")
 	t.Logf("Created ModelRoute: %s/%s (newer)", createdNewer.Namespace, createdNewer.Name)
@@ -1421,7 +1421,7 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteSimple.yaml"))
 	modelRoute.Namespace = testNamespace
 
-	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+	SetupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
 
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
@@ -1573,7 +1573,7 @@ func TestRateLimitMetricsShared(t *testing.T, testCtx *routercontext.RouterTestC
 	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(testDataDir, "ModelRouteWithRateLimit.yaml"))
 	modelRoute.Namespace = testNamespace
 
-	setupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
+	SetupModelRouteWithGatewayAPI(modelRoute, useGatewayAPI, kthenaNamespace)
 
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")

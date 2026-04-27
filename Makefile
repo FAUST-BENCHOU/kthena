@@ -108,16 +108,18 @@ test-e2e-controller-manager: ## Run controller-manager e2e tests.
 	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=10m ./test/e2e/controller-manager/...
 
 .PHONY: test-e2e-router
-test-e2e-router: ## Run router e2e tests.
+test-e2e-router: ## Run router e2e tests (includes session sticky without Gateway API).
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
 	@TEST_CATEGORY=router ./test/e2e/setup.sh
 	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=10m ./test/e2e/router
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=15m ./test/e2e/router/sessionsticky/...
 
 .PHONY: test-e2e-gateway-api
-test-e2e-gateway-api: ## Run gateway-api e2e tests.
+test-e2e-gateway-api: ## Run gateway-api e2e tests (includes session sticky with ParentRefs).
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
 	@TEST_CATEGORY=gateway-api ./test/e2e/setup.sh
 	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=10m ./test/e2e/router/gateway-api/...
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=15m ./test/e2e/router/sessionsticky-gateway/...
 
 .PHONY: test-e2e-gateway-inference-extension
 test-e2e-gateway-inference-extension: ## Run gateway-inference-extension e2e tests.

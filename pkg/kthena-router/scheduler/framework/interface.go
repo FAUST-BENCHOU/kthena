@@ -42,6 +42,10 @@ type Context struct {
 	// 2. PD aggregated mode, BestPods is selected for inference.
 	BestPods []*datastore.PodInfo
 
+	// StickyPodName, when set, forces aggregated scheduling to this Pod name if it remains
+	// in the filtered endpoint set (session affinity). Cleared when the Pod is unavailable.
+	StickyPodName string
+
 	// MetricsRecorder for recording scheduler plugin metrics
 	MetricsRecorder *metrics.RequestMetricsRecorder
 }

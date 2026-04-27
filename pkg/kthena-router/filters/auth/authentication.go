@@ -307,6 +307,34 @@ func (j *JWTAuthenticator) IsEnabled() bool {
 	return j.enabled
 }
 
+// GetClaimString returns a validated string JWT claim from the Authorization Bearer token.
+// Used for session affinity; returns empty when auth is disabled, the token is missing/invalid, or the claim is absent.
+func (j *JWTAuthenticator) GetClaimString(c *gin.Context, claimName string) string {
+	if !j.enabled || j.rotator == nil || claimName == "" {
+		return ""
+	}
+	tokenStr := extractTokenFromHeader(c.Request)
+	if tokenStr == "" {
+		return ""
+	}
+	jwksValue := j.rotator.GetJwks()
+	if jwksValue == nil || jwksValue.Jwks == nil {
+		return ""
+	}
+	token, err := jwt.Parse([]byte(tokenStr), jwt.WithKeySet(jwksValue.Jwks, jws.WithInferAlgorithmFromKey(true)))
+	if err != nil {
+		return ""
+	}
+	if err := j.validateClaims(token, jwksValue); err != nil {
+		return ""
+	}
+	var s string
+	if err := token.Get(claimName, &s); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(s)
+}
+
 // Authenticate returns a Gin middleware for JWT token validation
 func (j *JWTAuthenticator) Authenticate() gin.HandlerFunc {
 	return func(c *gin.Context) {
