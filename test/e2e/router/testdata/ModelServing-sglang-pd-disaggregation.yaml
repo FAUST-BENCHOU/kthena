@@ -1,0 +1,50 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: qwen3-8b-sglang-pd
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  template:
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          metadata:
+            labels:
+              app: qwen3-8b-sglang-pd
+              modelserving.volcano.sh/group-name: "group-0"
+              modelserving.volcano.sh/rolename: "P-instance"
+          spec:
+            containers:
+              - name: leader
+                image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
+                imagePullPolicy: IfNotPresent
+                env:
+                  - name: MODEL_NAME
+                    value: "Qwen/Qwen3-8B"
+                ports:
+                  - containerPort: 30000
+                  - containerPort: 8998
+        workerReplicas: 0
+      - name: decode
+        replicas: 1
+        entryTemplate:
+          metadata:
+            labels:
+              app: qwen3-8b-sglang-pd
+              modelserving.volcano.sh/group-name: "group-0"
+              modelserving.volcano.sh/rolename: "D-instance"
+          spec:
+            containers:
+              - name: leader
+                image: ghcr.io/faust-benchou/dynamo-mocker-sglang:v2026-04-23
+                imagePullPolicy: IfNotPresent
+                env:
+                  - name: MODEL_NAME
+                    value: "Qwen/Qwen3-8B"
+                ports:
+                  - containerPort: 30000
+                  - containerPort: 8998
+        workerReplicas: 0
