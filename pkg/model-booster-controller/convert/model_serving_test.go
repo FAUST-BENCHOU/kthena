@@ -105,6 +105,47 @@ func TestGetCachePath(t *testing.T) {
 	}
 }
 
+func TestGetPVCClaimName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "normal pvc URI",
+			input:    "pvc://my-pvc",
+			expected: "my-pvc",
+		},
+		{
+			name:     "extra leading slashes",
+			input:    "pvc:///my-pvc",
+			expected: "my-pvc",
+		},
+		{
+			name:     "trailing slash",
+			input:    "pvc://my-pvc/",
+			expected: "my-pvc",
+		},
+		{
+			name:     "multiple surrounding slashes",
+			input:    "pvc:////my-pvc////",
+			expected: "my-pvc",
+		},
+		{
+			name:     "empty",
+			input:    "",
+			expected: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GetPVCClaimName(tt.input); got != tt.expected {
+				t.Errorf("GetPVCClaimName() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestCreateModelServingResources(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -226,7 +267,22 @@ func TestBuildCacheVolume(t *testing.T) {
 				Name: "test-backend-weights",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: "/test-pvc",
+						ClaimName: "test-pvc",
+					},
+				},
+			},
+		},
+		{
+			name: "PVC URI with extra slashes",
+			input: &workload.ModelBackend{
+				Name:     "test-backend",
+				CacheURI: "pvc:///test-pvc",
+			},
+			expected: &corev1.Volume{
+				Name: "test-backend-weights",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "test-pvc",
 					},
 				},
 			},
