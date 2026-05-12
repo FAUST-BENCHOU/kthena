@@ -141,7 +141,7 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 		{
 			name: "no previous histogram returns zero latency for each metric",
 			allMetrics: map[string]*dto.MetricFamily{
-				ITL:  histogramMetricFamily(10.0, 5),
+				TPOT: histogramMetricFamily(10.0, 5),
 				TTFT: histogramMetricFamily(20.0, 8),
 			},
 			previousHistogram: map[string]*dto.Histogram{},
