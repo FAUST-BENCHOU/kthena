@@ -1493,16 +1493,11 @@ func (s *store) GetModelNames() []string {
 	s.routeMutex.RLock()
 	defer s.routeMutex.RUnlock()
 
-	seen := make(map[string]struct{})
+	names := make([]string, 0, len(s.routes)+len(s.loraRoutes))
 	for name := range s.routes {
-		seen[name] = struct{}{}
+		names = append(names, name)
 	}
 	for name := range s.loraRoutes {
-		seen[name] = struct{}{}
-	}
-
-	names := make([]string, 0, len(seen))
-	for name := range seen {
 		names = append(names, name)
 	}
 	sort.Strings(names)
