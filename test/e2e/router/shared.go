@@ -36,6 +36,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
+	"github.com/volcano-sh/kthena/test/e2e/framework"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
@@ -1923,10 +1924,18 @@ func sessionStickyDeleteKthenaRouterPodsAndWait(t *testing.T, testCtx *routercon
 	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routercontext.KthenaRouterDeploymentName, want, defaultScalingTimeout)
 }
 
+// sessionStickyRestartGlobalPortForward re-binds the test framework's localhost:8080 forward
+// after router pods are recreated (SetupPortForward targets a specific pod name).
+func sessionStickyRestartGlobalPortForward(t *testing.T, kthenaNamespace string) {
+	t.Helper()
+	require.NoError(t, framework.RestartRouterPortForward(kthenaNamespace))
+}
+
 func sessionStickyPatchRouterConfigRollingRestart(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, yamlBody string) {
 	t.Helper()
 	sessionStickyUpdateRouterConfigMapData(t, testCtx.KubeClient, kthenaNamespace, yamlBody)
 	sessionStickyDeleteKthenaRouterPodsAndWait(t, testCtx, kthenaNamespace)
+	sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
 }
 
 func sessionStickyCreateModelRouteFromFile(t *testing.T, ctx context.Context, testCtx *routercontext.RouterTestContext, testNamespace, kthenaNamespace string, useGatewayAPI bool, file string) *networkingv1alpha1.ModelRoute {
@@ -1964,6 +1973,7 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 	sessionStickyEnsureRouterExposeBackendPodHeader(t, testCtx.KubeClient, kthenaNamespace)
 
 	sessionStickyDeleteKthenaRouterPodsAndWait(t, testCtx, kthenaNamespace)
+	sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
 
 	t.Cleanup(func() {
 		cctx := context.Background()
@@ -1995,6 +2005,9 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 			}
 		}
 		_ = utils.WaitForDeploymentReadyE(cctx, testCtx.KubeClient, kthenaNamespace, routercontext.KthenaRouterDeploymentName, defaultScalingTimeout)
+		if err := framework.RestartRouterPortForward(kthenaNamespace); err != nil {
+			t.Logf("Warning: failed to restart router port-forward after session sticky cleanup: %v", err)
+		}
 	})
 
 	created := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-session-sticky.yaml")
@@ -2227,7 +2240,11 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 		}()
 
 		undoScale := scaleRouterDeployment(t, testCtx.KubeClient, kthenaNamespace, 2)
-		defer undoScale()
+		sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
+		defer func() {
+			undoScale()
+			sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
+		}()
 
 		mr := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-session-sticky-redis.yaml")
 		t.Cleanup(func() {
