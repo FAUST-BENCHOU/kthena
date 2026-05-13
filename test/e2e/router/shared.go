@@ -200,6 +200,7 @@ func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namesp
 	}
 
 	utils.WaitForDeploymentReady(t, ctx, kubeClient, namespace, deploymentName, replicas, defaultScalingTimeout)
+	sessionStickyWaitRouterDeploymentSettled(t, kubeClient, namespace)
 	t.Log("kthena-router deployment is ready")
 
 	return func() {
@@ -1937,6 +1938,25 @@ func sessionStickyUpdateRouterConfigMapData(t *testing.T, kubeClient kubernetes.
 	}
 }
 
+// sessionStickyWaitRouterDeploymentSettled waits until status.replicas matches spec (no rolling surge
+// extras). Otherwise port-forward can bind to a pod that is still terminating.
+func sessionStickyWaitRouterDeploymentSettled(t *testing.T, kube kubernetes.Interface, kthenaNamespace string) {
+	t.Helper()
+	ctx := context.Background()
+	require.Eventually(t, func() bool {
+		d, err := kube.AppsV1().Deployments(kthenaNamespace).Get(ctx, routercontext.KthenaRouterDeploymentName, metav1.GetOptions{})
+		if err != nil || d.Spec.Replicas == nil {
+			return false
+		}
+		want := *d.Spec.Replicas
+		if d.Status.ObservedGeneration < d.Generation {
+			return false
+		}
+		s := d.Status
+		return s.Replicas == want && s.ReadyReplicas == want && s.UpdatedReplicas == want
+	}, 5*time.Minute, 750*time.Millisecond, "kthena-router deployment not settled (replicas/ready/updated vs spec)")
+}
+
 // sessionStickyRolloutRestartRouterAndWait bumps the router Deployment (kubectl restartedAt)
 // so pods reload mounted ConfigMap via rolling update, avoiding a window with zero Running pods.
 func sessionStickyRolloutRestartRouterAndWait(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace string) {
@@ -1956,6 +1976,7 @@ func sessionStickyRolloutRestartRouterAndWait(t *testing.T, testCtx *routerconte
 		ctx, routercontext.KthenaRouterDeploymentName, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	require.NoError(t, err)
 	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routercontext.KthenaRouterDeploymentName, want, defaultScalingTimeout)
+	sessionStickyWaitRouterDeploymentSettled(t, testCtx.KubeClient, kthenaNamespace)
 }
 
 // sessionStickyRestartGlobalPortForward re-binds the test framework's localhost:8080 forward
@@ -2230,14 +2251,13 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 			undoScale()
 			sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
 		}()
+		sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
 
 		redisAddr := "redis-server:6379"
 		sessionStickyPatchRouterConfigRollingRestart(t, testCtx, kthenaNamespace, sessionStickyE2ERouterYAMLRedis(redisAddr))
 		defer func() {
 			sessionStickyPatchRouterConfigRollingRestart(t, testCtx, kthenaNamespace, sessionStickyE2ERouterYAMLMemory())
 		}()
-
-		sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
 
 		mr := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-session-sticky-redis.yaml")
 		t.Cleanup(func() {
