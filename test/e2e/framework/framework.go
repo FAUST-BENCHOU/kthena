@@ -143,12 +143,18 @@ func RestartRouterPortForward(namespace string) error {
 		pfForwarder.Close()
 		pfForwarder = nil
 	}
-	var err error
-	pfForwarder, err = utils.SetupPortForward(namespace, "kthena-router", "8080", "80")
-	if err != nil {
-		return fmt.Errorf("failed to restart router port-forward: %w", err)
+	deadline := time.Now().Add(2 * time.Minute)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		var err error
+		pfForwarder, err = utils.SetupPortForward(namespace, "kthena-router", "8080", "80")
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		time.Sleep(500 * time.Millisecond)
 	}
-	return nil
+	return fmt.Errorf("failed to restart router port-forward after retries: %w", lastErr)
 }
 
 // UninstallKthena uninstalls kthena via helm

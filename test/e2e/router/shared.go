@@ -46,6 +46,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -1936,7 +1937,9 @@ func sessionStickyUpdateRouterConfigMapData(t *testing.T, kubeClient kubernetes.
 	}
 }
 
-func sessionStickyDeleteKthenaRouterPodsAndWait(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace string) {
+// sessionStickyRolloutRestartRouterAndWait bumps the router Deployment (kubectl restartedAt)
+// so pods reload mounted ConfigMap via rolling update, avoiding a window with zero Running pods.
+func sessionStickyRolloutRestartRouterAndWait(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace string) {
 	t.Helper()
 	ctx := context.Background()
 	dep, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, routercontext.KthenaRouterDeploymentName, metav1.GetOptions{})
@@ -1945,13 +1948,13 @@ func sessionStickyDeleteKthenaRouterPodsAndWait(t *testing.T, testCtx *routercon
 	if dep.Spec.Replicas != nil {
 		want = *dep.Spec.Replicas
 	}
-	pl, err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: metav1.FormatLabelSelector(dep.Spec.Selector),
-	})
+	patch := []byte(fmt.Sprintf(
+		`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"%s"}}}}}`,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	))
+	_, err = testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Patch(
+		ctx, routercontext.KthenaRouterDeploymentName, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	require.NoError(t, err)
-	for i := range pl.Items {
-		_ = testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).Delete(ctx, pl.Items[i].Name, metav1.DeleteOptions{})
-	}
 	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routercontext.KthenaRouterDeploymentName, want, defaultScalingTimeout)
 }
 
@@ -1965,7 +1968,7 @@ func sessionStickyRestartGlobalPortForward(t *testing.T, kthenaNamespace string)
 func sessionStickyPatchRouterConfigRollingRestart(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, yamlBody string) {
 	t.Helper()
 	sessionStickyUpdateRouterConfigMapData(t, testCtx.KubeClient, kthenaNamespace, yamlBody)
-	sessionStickyDeleteKthenaRouterPodsAndWait(t, testCtx, kthenaNamespace)
+	sessionStickyRolloutRestartRouterAndWait(t, testCtx, kthenaNamespace)
 	sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
 }
 
@@ -1993,7 +1996,7 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 
 	sessionStickyUpdateRouterConfigMapData(t, testCtx.KubeClient, kthenaNamespace, sessionStickyE2ERouterYAMLMemory())
 
-	sessionStickyDeleteKthenaRouterPodsAndWait(t, testCtx, kthenaNamespace)
+	sessionStickyRolloutRestartRouterAndWait(t, testCtx, kthenaNamespace)
 	sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
 
 	t.Cleanup(func() {
@@ -2002,15 +2005,7 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 			cm.Data[routercontext.KthenaRouterConfigMapDataKey] = origData
 			_, _ = testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Update(cctx, cm, metav1.UpdateOptions{})
 		}
-		if d2, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(cctx, routercontext.KthenaRouterDeploymentName, metav1.GetOptions{}); err == nil {
-			pl, _ := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).List(cctx, metav1.ListOptions{
-				LabelSelector: metav1.FormatLabelSelector(d2.Spec.Selector),
-			})
-			for i := range pl.Items {
-				_ = testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).Delete(cctx, pl.Items[i].Name, metav1.DeleteOptions{})
-			}
-		}
-		_ = utils.WaitForDeploymentReadyE(cctx, testCtx.KubeClient, kthenaNamespace, routercontext.KthenaRouterDeploymentName, defaultScalingTimeout)
+		sessionStickyRolloutRestartRouterAndWait(t, testCtx, kthenaNamespace)
 		if err := framework.RestartRouterPortForward(kthenaNamespace); err != nil {
 			t.Logf("Warning: failed to restart router port-forward after session sticky cleanup: %v", err)
 		}
@@ -2038,21 +2033,19 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 	})
 
 	t.Run("E2E_SS_02_SessionKeyIsolation", func(t *testing.T) {
-		var a, b string
-		for range 20 {
+		var keyA, keyB, a, b string
+		require.Eventually(t, func() bool {
+			keyA = "ss02-key-a-" + utils.RandomString(6)
+			keyB = "ss02-key-b-" + utils.RandomString(6)
 			a = sessionStickySelectedPodAfterChatHeaders(t, testCtx, kthenaNamespace, created.Spec.ModelName, messages,
-				map[string]string{"X-Sticky-Session": "ss02-key-a"})
+				map[string]string{"X-Sticky-Session": keyA})
 			b = sessionStickySelectedPodAfterChatHeaders(t, testCtx, kthenaNamespace, created.Spec.ModelName, messages,
-				map[string]string{"X-Sticky-Session": "ss02-key-b"})
-			if a != "" && b != "" && a != b {
-				break
-			}
-		}
-		require.NotEmpty(t, a)
-		require.NotEmpty(t, b)
-		require.NotEqual(t, a, b, "two session keys should land on different backends with random scoring")
+				map[string]string{"X-Sticky-Session": keyB})
+			return a != "" && b != "" && a != b
+		}, 3*time.Minute, 400*time.Millisecond,
+			"two fresh session keys should land on different backends (random score + multiple replicas)")
 		aAgain := sessionStickySelectedPodAfterChatHeaders(t, testCtx, kthenaNamespace, created.Spec.ModelName, messages,
-			map[string]string{"X-Sticky-Session": "ss02-key-a"})
+			map[string]string{"X-Sticky-Session": keyA})
 		require.Equal(t, a, aAgain, "returning to first session key must not adopt second key binding")
 	})
 
@@ -2232,18 +2225,19 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 		redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
 		defer redisCleanup()
 
+		undoScale := scaleRouterDeployment(t, testCtx.KubeClient, kthenaNamespace, 2)
+		defer func() {
+			undoScale()
+			sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
+		}()
+
 		redisAddr := "redis-server:6379"
 		sessionStickyPatchRouterConfigRollingRestart(t, testCtx, kthenaNamespace, sessionStickyE2ERouterYAMLRedis(redisAddr))
 		defer func() {
 			sessionStickyPatchRouterConfigRollingRestart(t, testCtx, kthenaNamespace, sessionStickyE2ERouterYAMLMemory())
 		}()
 
-		undoScale := scaleRouterDeployment(t, testCtx.KubeClient, kthenaNamespace, 2)
 		sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
-		defer func() {
-			undoScale()
-			sessionStickyRestartGlobalPortForward(t, kthenaNamespace)
-		}()
 
 		mr := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-session-sticky-redis.yaml")
 		t.Cleanup(func() {
