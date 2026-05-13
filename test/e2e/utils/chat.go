@@ -57,7 +57,7 @@ type ChatCompletionsRequest struct {
 type ChatCompletionsResponse struct {
 	StatusCode int
 	Body       string
-	Attempts int
+	Attempts   int
 }
 
 // CheckChatCompletions sends a chat completions request to the router service and verifies the response.

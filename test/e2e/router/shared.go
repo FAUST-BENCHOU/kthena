@@ -2067,9 +2067,9 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 			return a != "" && b != "" && a != b
 		}, 3*time.Minute, 400*time.Millisecond,
 			"two fresh session keys should land on different backends (random score + multiple replicas)")
-		aAgain := sessionStickySelectedPodAfterChatHeaders(t, testCtx, kthenaNamespace, created.Spec.ModelName, messages,
+		secondCallPod := sessionStickySelectedPodAfterChatHeaders(t, testCtx, kthenaNamespace, created.Spec.ModelName, messages,
 			map[string]string{"X-Sticky-Session": keyA})
-		require.Equal(t, a, aAgain, "returning to first session key must not adopt second key binding")
+		require.Equal(t, a, secondCallPod, "returning to first session key must not adopt second key binding")
 	})
 
 	t.Run("E2E_SS_03_NoStickyKeyLoadSpread", func(t *testing.T) {
