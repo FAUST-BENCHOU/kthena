@@ -52,6 +52,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/sessionsticky"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -88,6 +89,8 @@ type Router struct {
 	fairnessTimeout  time.Duration
 	tokenWeight      float64 // Weight for token-based priority (default 1.0)
 	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
+
+	stickyStore sessionsticky.Store
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
@@ -122,6 +125,11 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	routerConfig, err := conf.ParseRouterConfig(routerConfigPath)
 	if err != nil {
 		klog.Fatalf("failed to parse router config: %v", err)
+	}
+
+	stickyStore, err := sessionsticky.NewStore(routerConfig.SessionSticky)
+	if err != nil {
+		klog.Fatalf("session sticky store: %v", err)
 	}
 
 	// Initialize access logger with configuration from environment variables
@@ -167,6 +175,7 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 		fairnessTimeout:  parseFairnessTimeout(),
 		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
 		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
+		stickyStore:      stickyStore,
 	}
 }
 
@@ -441,12 +450,34 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		pdGroup = modelServer.Spec.WorkloadSelector.PDGroup
 	}
 
+	stickySpec := (*v1alpha1.SessionSticky)(nil)
+	if modelRoute != nil {
+		stickySpec = modelRoute.Spec.SessionSticky
+	}
+	if stickySpec != nil && pdGroup != nil && modelRoute != nil {
+		klog.InfoS("session sticky bypassed for PD model", "modelRoute", klog.KObj(modelRoute))
+		stickySpec = nil
+	}
+
+	var sessionKey, stickyStoreKey string
+	var stickyHint string
+	if stickySpec != nil && r.stickyStore != nil {
+		sessionKey = sessionsticky.ExtractSessionKey(c, stickySpec, r.authenticator)
+		if sessionKey != "" {
+			stickyStoreKey = sessionsticky.MappingKey(types.NamespacedName{Namespace: modelRoute.Namespace, Name: modelRoute.Name}, sessionKey)
+			if mapped, ok := r.stickyStore.Get(c.Request.Context(), stickyStoreKey); ok && mapped != "" {
+				stickyHint = mapped
+			}
+		}
+	}
+
 	ctx := &framework.Context{
 		Model:           modelName,
 		Prompt:          prompt,
 		ModelServerName: modelServerName,
 		PDGroup:         pdGroup,
 		MetricsRecorder: metricsRecorder,
+		StickyPodName:   stickyHint,
 	}
 
 	err = r.scheduler.Schedule(ctx, pods)
@@ -454,6 +485,26 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		accesslog.SetError(c, "scheduling", fmt.Sprintf("can't schedule to target pod: %v", err))
 		c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("can't schedule to target pod: %v", err))
 		return
+	}
+
+	if ctx.StickyPodMiss && sessionKey != "" && stickyStoreKey != "" && r.stickyStore != nil {
+		r.stickyStore.Delete(c.Request.Context(), stickyStoreKey)
+		klog.InfoS("session sticky: mapped pod no longer selectable, cleared binding", "key", stickyStoreKey)
+	}
+
+	if sessionKey != "" && stickySpec != nil && r.stickyStore != nil && len(ctx.BestPods) > 0 && ctx.BestPods[0].Pod != nil {
+		ttl := sessionsticky.TTL(stickySpec)
+		out, cerr := r.stickyStore.Commit(c.Request.Context(), stickyStoreKey, ctx.BestPods[0].Pod.Name, ttl)
+		if cerr != nil {
+			klog.Errorf("session sticky commit: %v", cerr)
+		} else if out != "" && out != ctx.BestPods[0].Pod.Name {
+			for _, p := range pods {
+				if p.Pod != nil && p.Pod.Name == out {
+					ctx.BestPods = []*datastore.PodInfo{p}
+					break
+				}
+			}
+		}
 	}
 
 	// Set complete request routing information in access log
