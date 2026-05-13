@@ -175,7 +175,7 @@ func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string
 func scaleRouterDeployment(t *testing.T, kubeClient kubernetes.Interface, namespace string, replicas int32) func() {
 	t.Helper()
 	ctx := context.Background()
-	const deploymentName = "kthena-router"
+	deploymentName := routercontext.KthenaRouterDeploymentName
 
 	deployment, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get kthena-router deployment")
@@ -1800,6 +1800,417 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 				"type":   "score",
 			})
 			assert.Equal(t, uint64(0), count, "Plugin %q should not be active after config update", removedPlugin)
+		}
+	})
+}
+
+// --- Session sticky E2E (proposal E2E-SS-01 .. E2E-SS-12) ---
+
+func sessionStickyE2ERouterYAMLMemory() string {
+	return `scheduler:
+  plugins:
+    Filter:
+      enabled: []
+    Score:
+      enabled:
+        - name: random
+          weight: 1
+sessionSticky:
+  backend: memory
+`
+}
+
+func sessionStickyE2ERouterYAMLRedis(redisAddr string) string {
+	return fmt.Sprintf(`scheduler:
+  plugins:
+    Filter:
+      enabled: []
+    Score:
+      enabled:
+        - name: random
+          weight: 1
+sessionSticky:
+  backend: redis
+  redis:
+    address: %s
+`, redisAddr)
+}
+
+func sessionStickyDeleteKthenaRouterPodsAndWait(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace string) {
+	t.Helper()
+	ctx := context.Background()
+	dep, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, routercontext.KthenaRouterDeploymentName, metav1.GetOptions{})
+	require.NoError(t, err)
+	want := int32(1)
+	if dep.Spec.Replicas != nil {
+		want = *dep.Spec.Replicas
+	}
+	pl, err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: metav1.FormatLabelSelector(dep.Spec.Selector),
+	})
+	require.NoError(t, err)
+	for i := range pl.Items {
+		_ = testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).Delete(ctx, pl.Items[i].Name, metav1.DeleteOptions{})
+	}
+	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routercontext.KthenaRouterDeploymentName, want, defaultScalingTimeout)
+}
+
+func sessionStickyPatchRouterConfigRollingRestart(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, yamlBody string) {
+	t.Helper()
+	ctx := context.Background()
+	cm, err := testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Get(ctx, routercontext.KthenaRouterConfigMapName, metav1.GetOptions{})
+	require.NoError(t, err)
+	cm.Data[routercontext.KthenaRouterConfigMapDataKey] = yamlBody
+	_, err = testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Update(ctx, cm, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	sessionStickyDeleteKthenaRouterPodsAndWait(t, testCtx, kthenaNamespace)
+}
+
+func sessionStickyCreateModelRouteFromFile(t *testing.T, ctx context.Context, testCtx *routercontext.RouterTestContext, testNamespace, kthenaNamespace string, useGatewayAPI bool, file string) *networkingv1alpha1.ModelRoute {
+	t.Helper()
+	mr := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, file))
+	mr.Namespace = testNamespace
+	setupModelRouteWithGatewayAPI(mr, useGatewayAPI, kthenaNamespace)
+	out, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, mr, metav1.CreateOptions{})
+	require.NoError(t, err)
+	return out
+}
+
+func sessionStickyBackendPodFromResponse(t *testing.T, resp *utils.ChatCompletionsResponse) string {
+	t.Helper()
+	require.NotNil(t, resp)
+	if resp.ResponseHeader == nil {
+		return ""
+	}
+	return resp.ResponseHeader.Get("X-Kthena-Backend-Pod")
+}
+
+// TestSessionStickyShared implements proposal E2E-SS-01..12 with consistent subtest names E2E_SS_XX_*.
+func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
+	if kthenaNamespace == "" {
+		t.Skip("kthena namespace required for router config patch")
+	}
+	ctx := context.Background()
+
+	origCM, err := testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Get(ctx, routercontext.KthenaRouterConfigMapName, metav1.GetOptions{})
+	require.NoError(t, err)
+	origData := origCM.Data[routercontext.KthenaRouterConfigMapDataKey]
+	require.NotEmpty(t, origData)
+
+	patchedCM := origCM.DeepCopy()
+	patchedCM.Data[routercontext.KthenaRouterConfigMapDataKey] = sessionStickyE2ERouterYAMLMemory()
+	_, err = testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Update(ctx, patchedCM, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	dep, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, routercontext.KthenaRouterDeploymentName, metav1.GetOptions{})
+	require.NoError(t, err)
+	depCopy := dep.DeepCopy()
+	foundRouter := false
+	for i := range depCopy.Spec.Template.Spec.Containers {
+		if depCopy.Spec.Template.Spec.Containers[i].Name != "kthena-router" {
+			continue
+		}
+		foundRouter = true
+		env := depCopy.Spec.Template.Spec.Containers[i].Env
+		have := false
+		for j := range env {
+			if env[j].Name == "ROUTER_EXPOSE_BACKEND_POD_HEADER" {
+				env[j].Value = "true"
+				have = true
+				break
+			}
+		}
+		if !have {
+			env = append(env, corev1.EnvVar{Name: "ROUTER_EXPOSE_BACKEND_POD_HEADER", Value: "true"})
+		}
+		depCopy.Spec.Template.Spec.Containers[i].Env = env
+	}
+	require.True(t, foundRouter, "kthena-router container not found in deployment")
+	_, err = testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Update(ctx, depCopy, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	sessionStickyDeleteKthenaRouterPodsAndWait(t, testCtx, kthenaNamespace)
+
+	t.Cleanup(func() {
+		cctx := context.Background()
+		if cm, err := testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Get(cctx, routercontext.KthenaRouterConfigMapName, metav1.GetOptions{}); err == nil {
+			cm.Data[routercontext.KthenaRouterConfigMapDataKey] = origData
+			_, _ = testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Update(cctx, cm, metav1.UpdateOptions{})
+		}
+		if d, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(cctx, routercontext.KthenaRouterDeploymentName, metav1.GetOptions{}); err == nil {
+			for i := range d.Spec.Template.Spec.Containers {
+				if d.Spec.Template.Spec.Containers[i].Name != "kthena-router" {
+					continue
+				}
+				var ne []corev1.EnvVar
+				for _, e := range d.Spec.Template.Spec.Containers[i].Env {
+					if e.Name != "ROUTER_EXPOSE_BACKEND_POD_HEADER" {
+						ne = append(ne, e)
+					}
+				}
+				d.Spec.Template.Spec.Containers[i].Env = ne
+			}
+			_, _ = testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Update(cctx, d, metav1.UpdateOptions{})
+		}
+		if d2, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(cctx, routercontext.KthenaRouterDeploymentName, metav1.GetOptions{}); err == nil {
+			pl, _ := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).List(cctx, metav1.ListOptions{
+				LabelSelector: metav1.FormatLabelSelector(d2.Spec.Selector),
+			})
+			for i := range pl.Items {
+				_ = testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).Delete(cctx, pl.Items[i].Name, metav1.DeleteOptions{})
+			}
+		}
+		_ = utils.WaitForDeploymentReadyE(cctx, testCtx.KubeClient, kthenaNamespace, routercontext.KthenaRouterDeploymentName, defaultScalingTimeout)
+	})
+
+	created := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-session-sticky.yaml")
+	t.Cleanup(func() {
+		_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), created.Name, metav1.DeleteOptions{})
+	})
+
+	messages := []utils.ChatMessage{utils.NewChatMessage("user", "Hi")}
+
+	t.Run("E2E_SS_01_BasicStickinessHeader", func(t *testing.T) {
+		hdr := map[string]string{"X-Sticky-Session": "ss01-alpha"}
+		var first string
+		for range 8 {
+			resp := utils.CheckChatCompletionsWithHeaders(t, created.Spec.ModelName, messages, hdr)
+			pod := sessionStickyBackendPodFromResponse(t, resp)
+			require.NotEmpty(t, pod)
+			if first == "" {
+				first = pod
+			} else {
+				require.Equal(t, first, pod)
+			}
+		}
+	})
+
+	t.Run("E2E_SS_02_SessionKeyIsolation", func(t *testing.T) {
+		var a, b string
+		for range 20 {
+			a = sessionStickyBackendPodFromResponse(t, utils.CheckChatCompletionsWithHeaders(t, created.Spec.ModelName, messages,
+				map[string]string{"X-Sticky-Session": "ss02-key-a"}))
+			b = sessionStickyBackendPodFromResponse(t, utils.CheckChatCompletionsWithHeaders(t, created.Spec.ModelName, messages,
+				map[string]string{"X-Sticky-Session": "ss02-key-b"}))
+			if a != "" && b != "" && a != b {
+				break
+			}
+		}
+		require.NotEmpty(t, a)
+		require.NotEmpty(t, b)
+		require.NotEqual(t, a, b, "two session keys should land on different backends with random scoring")
+		aAgain := sessionStickyBackendPodFromResponse(t, utils.CheckChatCompletionsWithHeaders(t, created.Spec.ModelName, messages,
+			map[string]string{"X-Sticky-Session": "ss02-key-a"}))
+		require.Equal(t, a, aAgain, "returning to first session key must not adopt second key binding")
+	})
+
+	t.Run("E2E_SS_03_NoStickyKeyLoadSpread", func(t *testing.T) {
+		seen := map[string]struct{}{}
+		for range 24 {
+			resp := utils.CheckChatCompletions(t, created.Spec.ModelName, messages)
+			p := sessionStickyBackendPodFromResponse(t, resp)
+			require.NotEmpty(t, p)
+			seen[p] = struct{}{}
+		}
+		require.GreaterOrEqual(t, len(seen), 2, "without sticky header expect LB spread across backends")
+	})
+
+	t.Run("E2E_SS_04_NoSessionStickyConfigIgnoresStickyLikeHeader", func(t *testing.T) {
+		mr := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-session-sticky-ss04-no-sticky.yaml")
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), mr.Name, metav1.DeleteOptions{})
+		})
+		hdr := map[string]string{"X-Sticky-Session": "ss04-should-be-ignored"}
+		seen := map[string]struct{}{}
+		for range 24 {
+			resp := utils.CheckChatCompletionsWithHeaders(t, mr.Spec.ModelName, messages, hdr)
+			p := sessionStickyBackendPodFromResponse(t, resp)
+			require.NotEmpty(t, p)
+			seen[p] = struct{}{}
+		}
+		require.GreaterOrEqual(t, len(seen), 2, "route without sessionSticky must not pin by client header")
+	})
+
+	t.Run("E2E_SS_05_QuerySourceStickiness", func(t *testing.T) {
+		mr := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-session-sticky-query.yaml")
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), mr.Name, metav1.DeleteOptions{})
+		})
+		url := utils.DefaultRouterURL + "?sticky_q=ss05-one"
+		var first string
+		for range 6 {
+			resp := utils.CheckChatCompletionsWithURLAndHeaders(t, url, mr.Spec.ModelName, messages, nil)
+			pod := sessionStickyBackendPodFromResponse(t, resp)
+			require.NotEmpty(t, pod)
+			if first == "" {
+				first = pod
+			} else {
+				require.Equal(t, first, pod)
+			}
+		}
+	})
+
+	t.Run("E2E_SS_06_CookieSourceStickiness", func(t *testing.T) {
+		mr := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-session-sticky-cookie.yaml")
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), mr.Name, metav1.DeleteOptions{})
+		})
+		hdr := map[string]string{"Cookie": "sticky_sid=ss06-cookie-val"}
+		var first string
+		for range 6 {
+			resp := utils.CheckChatCompletionsWithHeaders(t, mr.Spec.ModelName, messages, hdr)
+			pod := sessionStickyBackendPodFromResponse(t, resp)
+			require.NotEmpty(t, pod)
+			if first == "" {
+				first = pod
+			} else {
+				require.Equal(t, first, pod)
+			}
+		}
+	})
+
+	t.Run("E2E_SS_07_ShortTTLAllowsRebindAfterExpiry", func(t *testing.T) {
+		mr := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-session-sticky-ttl.yaml")
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), mr.Name, metav1.DeleteOptions{})
+		})
+		hdr := map[string]string{"X-Sticky-Session": "ss07-ttl"}
+		var before string
+		for range 4 {
+			resp := utils.CheckChatCompletionsWithHeaders(t, mr.Spec.ModelName, messages, hdr)
+			p := sessionStickyBackendPodFromResponse(t, resp)
+			require.NotEmpty(t, p)
+			if before == "" {
+				before = p
+			} else {
+				require.Equal(t, before, p, "within TTL same session must stay pinned")
+			}
+		}
+		time.Sleep(4 * time.Second)
+		resp := utils.CheckChatCompletionsWithHeaders(t, mr.Spec.ModelName, messages, hdr)
+		after := sessionStickyBackendPodFromResponse(t, resp)
+		require.NotEmpty(t, after)
+	})
+
+	t.Run("E2E_SS_08_FailoverDeletesStaleBinding", func(t *testing.T) {
+		hdr := map[string]string{"X-Sticky-Session": "ss08-failover"}
+		stickyPod := sessionStickyBackendPodFromResponse(t, utils.CheckChatCompletionsWithHeaders(t, created.Spec.ModelName, messages, hdr))
+		require.NotEmpty(t, stickyPod)
+		pl, err := testCtx.KubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("%s=%s", routercontext.BackendDeploymentAppLabelKey, routercontext.Deployment1_5bName),
+		})
+		require.NoError(t, err)
+		var deleted bool
+		for i := range pl.Items {
+			if pl.Items[i].Name == stickyPod {
+				err := testCtx.KubeClient.CoreV1().Pods(testNamespace).Delete(ctx, pl.Items[i].Name, metav1.DeleteOptions{})
+				require.NoError(t, err)
+				deleted = true
+				break
+			}
+		}
+		require.True(t, deleted, "expected to delete the sticky backend pod %s", stickyPod)
+		utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, testNamespace, "deepseek-r1-1-5b", 3, defaultScalingTimeout)
+		newPod := sessionStickyBackendPodFromResponse(t, utils.CheckChatCompletionsWithHeaders(t, created.Spec.ModelName, messages, hdr))
+		require.NotEmpty(t, newPod)
+		require.NotEqual(t, stickyPod, newPod, "after backend loss same session must not route to deleted pod name")
+	})
+
+	t.Run("E2E_SS_10_AdmissionRejectEmptySources", func(t *testing.T) {
+		bad := created.DeepCopy()
+		bad.Name = "e2e-ss10-bad-" + utils.RandomString(5)
+		bad.ResourceVersion = ""
+		bad.Spec.SessionSticky = &networkingv1alpha1.SessionSticky{Sources: []networkingv1alpha1.SessionKeySource{}}
+		_, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, bad, metav1.CreateOptions{})
+		require.Error(t, err)
+	})
+
+	t.Run("E2E_SS_11_HeaderPrecedenceOverQuery", func(t *testing.T) {
+		mr := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-session-sticky-precedence.yaml")
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), mr.Name, metav1.DeleteOptions{})
+		})
+		hdr := map[string]string{"X-Sticky-Session": "ss11-header-wins"}
+		base := sessionStickyBackendPodFromResponse(t, utils.CheckChatCompletionsWithHeaders(t, mr.Spec.ModelName, messages, hdr))
+		require.NotEmpty(t, base)
+		url := utils.DefaultRouterURL + "?sticky_q=ss11-query-ignored"
+		withBoth := sessionStickyBackendPodFromResponse(t, utils.CheckChatCompletionsWithURLAndHeaders(t, url, mr.Spec.ModelName, messages, hdr))
+		require.Equal(t, base, withBoth, "first matching source in spec is Header; query must not change session key")
+	})
+
+	t.Run("E2E_SS_12_PDBypassLogsWhenSessionStickyConfigured", func(t *testing.T) {
+		t.Log("Deploying PD stack for SS-12...")
+		pdServingName := routercontext.Deployment1_5bName
+		pdModelServerName := routercontext.ModelServerPDDisaggregationName
+
+		modelServing := utils.LoadYAMLFromFile[workloadv1alpha1.ModelServing](filepath.Join(routercontext.TestDataDir, "ModelServing-ds1.5b-pd-disaggregation.yaml"))
+		modelServing.Namespace = testNamespace
+		_, errMS := testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+		if errMS != nil && !apierrors.IsAlreadyExists(errMS) {
+			require.NoError(t, errMS)
+		}
+		if errMS == nil {
+			t.Cleanup(func() {
+				_ = testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(context.Background(), pdServingName, metav1.DeleteOptions{})
+			})
+		}
+		utils.WaitForModelServingReady(t, ctx, testCtx.KthenaClient, testNamespace, pdServingName)
+
+		modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(routercontext.TestDataDir, "ModelServer-ds1.5b-pd-disaggregation.yaml"))
+		modelServer.Namespace = testNamespace
+		_, errSrv := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Create(ctx, modelServer, metav1.CreateOptions{})
+		if errSrv != nil && !apierrors.IsAlreadyExists(errSrv) {
+			require.NoError(t, errSrv)
+		}
+		if errSrv == nil {
+			t.Cleanup(func() {
+				_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testNamespace).Delete(context.Background(), pdModelServerName, metav1.DeleteOptions{})
+			})
+		}
+
+		mr := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-pd-with-session-sticky.yaml")
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), mr.Name, metav1.DeleteOptions{})
+		})
+		utils.WaitForChatModelReady(t, utils.DefaultRouterURL, mr.Spec.ModelName, messages, 5*time.Minute)
+
+		routerPod := utils.GetRouterPod(t, testCtx.KubeClient, kthenaNamespace)
+		hdr := map[string]string{"X-Sticky-Session": "ss12-pd"}
+		_ = utils.CheckChatCompletionsWithHeaders(t, mr.Spec.ModelName, messages, hdr)
+
+		utils.WaitForPodLogsContain(t, testCtx.KubeClient, kthenaNamespace, routerPod.Name, 2*time.Minute,
+			[]string{"session sticky bypassed for PD model"}, 90*time.Second, 2*time.Second)
+	})
+
+	t.Run("E2E_SS_09_MultiReplicaRedisStickyStore", func(t *testing.T) {
+		redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
+		defer redisCleanup()
+
+		redisAddr := "redis-server:6379"
+		sessionStickyPatchRouterConfigRollingRestart(t, testCtx, kthenaNamespace, sessionStickyE2ERouterYAMLRedis(redisAddr))
+		defer func() {
+			sessionStickyPatchRouterConfigRollingRestart(t, testCtx, kthenaNamespace, sessionStickyE2ERouterYAMLMemory())
+		}()
+
+		undoScale := scaleRouterDeployment(t, testCtx.KubeClient, kthenaNamespace, 2)
+		defer undoScale()
+
+		mr := sessionStickyCreateModelRouteFromFile(t, ctx, testCtx, testNamespace, kthenaNamespace, useGatewayAPI, "ModelRoute-session-sticky-redis.yaml")
+		t.Cleanup(func() {
+			_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(context.Background(), mr.Name, metav1.DeleteOptions{})
+		})
+
+		hdr := map[string]string{"X-Sticky-Session": "ss09-redis-shared"}
+		var first string
+		for range 12 {
+			resp := utils.CheckChatCompletionsWithHeaders(t, mr.Spec.ModelName, messages, hdr)
+			pod := sessionStickyBackendPodFromResponse(t, resp)
+			require.NotEmpty(t, pod)
+			if first == "" {
+				first = pod
+			} else {
+				require.Equal(t, first, pod, "with Redis store two router replicas must agree on backend for same session")
+			}
 		}
 	})
 }
