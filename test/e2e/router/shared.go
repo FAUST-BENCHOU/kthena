@@ -1977,6 +1977,8 @@ func sessionStickyRolloutRestartRouterAndWait(t *testing.T, testCtx *routerconte
 	require.NoError(t, err)
 	utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, kthenaNamespace, routercontext.KthenaRouterDeploymentName, want, defaultScalingTimeout)
 	sessionStickyWaitRouterDeploymentSettled(t, testCtx.KubeClient, kthenaNamespace)
+	require.NoError(t, utils.WaitForKthenaRouterModelRouteValidatingWebhook(ctx, testCtx.KthenaClient, testCtx.Namespace, routercontext.ModelServer1_5bName, "ss-webhook-probe-", 3*time.Second, 4*time.Minute, t.Logf),
+		"kthena-router ModelRoute validating webhook did not become ready after router rollout")
 }
 
 // sessionStickyRestartGlobalPortForward re-binds the test framework's localhost:8080 forward

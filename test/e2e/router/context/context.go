@@ -44,7 +44,7 @@ const (
 	ModelServerSglangName = "sglang-mock"
 	// ModelServerPDDisaggregationName matches testdata ModelServer-ds1.5b-pd-disaggregation.yaml.
 	ModelServerPDDisaggregationName = "deepseek-r1-1-5b-pd-disaggregation"
-	TestDataDir           = "test/e2e/router/testdata"
+	TestDataDir                     = "test/e2e/router/testdata"
 
 	// KthenaRouter* match charts/kthena/charts/networking kthena-router templates.
 	KthenaRouterConfigMapName    = "kthena-router-config"
