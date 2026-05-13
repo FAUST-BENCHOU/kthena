@@ -1836,6 +1836,74 @@ sessionSticky:
 `, redisAddr)
 }
 
+// sessionStickyUpdateRouterConfigMapData writes routerConfiguration with re-fetch and retries on
+// optimistic-lock conflicts (same pattern as TestRouterConfigUpdateShared).
+func sessionStickyUpdateRouterConfigMapData(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace, yamlBody string) {
+	t.Helper()
+	ctx := context.Background()
+	const maxAttempts = 15
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		cm, err := kubeClient.CoreV1().ConfigMaps(kthenaNamespace).Get(ctx, routercontext.KthenaRouterConfigMapName, metav1.GetOptions{})
+		require.NoError(t, err)
+		cm = cm.DeepCopy()
+		cm.Data[routercontext.KthenaRouterConfigMapDataKey] = yamlBody
+		_, err = kubeClient.CoreV1().ConfigMaps(kthenaNamespace).Update(ctx, cm, metav1.UpdateOptions{})
+		if err == nil {
+			return
+		}
+		if apierrors.IsConflict(err) && attempt+1 < maxAttempts {
+			time.Sleep(time.Duration(25*(attempt+1)) * time.Millisecond)
+			continue
+		}
+		require.NoError(t, err)
+	}
+}
+
+// sessionStickyEnsureRouterExposeBackendPodHeader sets ROUTER_EXPOSE_BACKEND_POD_HEADER on the
+// kthena-router container with re-fetch and retries on Deployment update conflicts.
+func sessionStickyEnsureRouterExposeBackendPodHeader(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace string) {
+	t.Helper()
+	ctx := context.Background()
+	const maxAttempts = 15
+	const containerName = "kthena-router"
+	const envName = "ROUTER_EXPOSE_BACKEND_POD_HEADER"
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		dep, err := kubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, routercontext.KthenaRouterDeploymentName, metav1.GetOptions{})
+		require.NoError(t, err)
+		depCopy := dep.DeepCopy()
+		foundRouter := false
+		for i := range depCopy.Spec.Template.Spec.Containers {
+			if depCopy.Spec.Template.Spec.Containers[i].Name != containerName {
+				continue
+			}
+			foundRouter = true
+			env := depCopy.Spec.Template.Spec.Containers[i].Env
+			have := false
+			for j := range env {
+				if env[j].Name == envName {
+					env[j].Value = "true"
+					have = true
+					break
+				}
+			}
+			if !have {
+				env = append(env, corev1.EnvVar{Name: envName, Value: "true"})
+			}
+			depCopy.Spec.Template.Spec.Containers[i].Env = env
+		}
+		require.True(t, foundRouter, "%s container not found in deployment", containerName)
+		_, err = kubeClient.AppsV1().Deployments(kthenaNamespace).Update(ctx, depCopy, metav1.UpdateOptions{})
+		if err == nil {
+			return
+		}
+		if apierrors.IsConflict(err) && attempt+1 < maxAttempts {
+			time.Sleep(time.Duration(25*(attempt+1)) * time.Millisecond)
+			continue
+		}
+		require.NoError(t, err)
+	}
+}
+
 func sessionStickyDeleteKthenaRouterPodsAndWait(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace string) {
 	t.Helper()
 	ctx := context.Background()
@@ -1857,12 +1925,7 @@ func sessionStickyDeleteKthenaRouterPodsAndWait(t *testing.T, testCtx *routercon
 
 func sessionStickyPatchRouterConfigRollingRestart(t *testing.T, testCtx *routercontext.RouterTestContext, kthenaNamespace, yamlBody string) {
 	t.Helper()
-	ctx := context.Background()
-	cm, err := testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Get(ctx, routercontext.KthenaRouterConfigMapName, metav1.GetOptions{})
-	require.NoError(t, err)
-	cm.Data[routercontext.KthenaRouterConfigMapDataKey] = yamlBody
-	_, err = testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Update(ctx, cm, metav1.UpdateOptions{})
-	require.NoError(t, err)
+	sessionStickyUpdateRouterConfigMapData(t, testCtx.KubeClient, kthenaNamespace, yamlBody)
 	sessionStickyDeleteKthenaRouterPodsAndWait(t, testCtx, kthenaNamespace)
 }
 
@@ -1897,37 +1960,8 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 	origData := origCM.Data[routercontext.KthenaRouterConfigMapDataKey]
 	require.NotEmpty(t, origData)
 
-	patchedCM := origCM.DeepCopy()
-	patchedCM.Data[routercontext.KthenaRouterConfigMapDataKey] = sessionStickyE2ERouterYAMLMemory()
-	_, err = testCtx.KubeClient.CoreV1().ConfigMaps(kthenaNamespace).Update(ctx, patchedCM, metav1.UpdateOptions{})
-	require.NoError(t, err)
-
-	dep, err := testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, routercontext.KthenaRouterDeploymentName, metav1.GetOptions{})
-	require.NoError(t, err)
-	depCopy := dep.DeepCopy()
-	foundRouter := false
-	for i := range depCopy.Spec.Template.Spec.Containers {
-		if depCopy.Spec.Template.Spec.Containers[i].Name != "kthena-router" {
-			continue
-		}
-		foundRouter = true
-		env := depCopy.Spec.Template.Spec.Containers[i].Env
-		have := false
-		for j := range env {
-			if env[j].Name == "ROUTER_EXPOSE_BACKEND_POD_HEADER" {
-				env[j].Value = "true"
-				have = true
-				break
-			}
-		}
-		if !have {
-			env = append(env, corev1.EnvVar{Name: "ROUTER_EXPOSE_BACKEND_POD_HEADER", Value: "true"})
-		}
-		depCopy.Spec.Template.Spec.Containers[i].Env = env
-	}
-	require.True(t, foundRouter, "kthena-router container not found in deployment")
-	_, err = testCtx.KubeClient.AppsV1().Deployments(kthenaNamespace).Update(ctx, depCopy, metav1.UpdateOptions{})
-	require.NoError(t, err)
+	sessionStickyUpdateRouterConfigMapData(t, testCtx.KubeClient, kthenaNamespace, sessionStickyE2ERouterYAMLMemory())
+	sessionStickyEnsureRouterExposeBackendPodHeader(t, testCtx.KubeClient, kthenaNamespace)
 
 	sessionStickyDeleteKthenaRouterPodsAndWait(t, testCtx, kthenaNamespace)
 
