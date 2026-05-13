@@ -57,9 +57,7 @@ type ChatCompletionsRequest struct {
 type ChatCompletionsResponse struct {
 	StatusCode int
 	Body       string
-	Attempts   int
-	// ResponseHeader is set on success from the last HTTP response (may be nil).
-	ResponseHeader http.Header
+	Attempts int
 }
 
 // CheckChatCompletions sends a chat completions request to the router service and verifies the response.
@@ -175,15 +173,11 @@ func sendChatRequestWithRetry(t *testing.T, url string, modelName string, messag
 		break
 	}
 
-	out := &ChatCompletionsResponse{
+	return &ChatCompletionsResponse{
 		StatusCode: resp.StatusCode,
 		Body:       responseStr,
 		Attempts:   attempt + 1,
 	}
-	if resp != nil && resp.Header != nil {
-		out.ResponseHeader = resp.Header.Clone()
-	}
-	return out
 }
 
 func CheckChatCompletionsWithURLAndHeaders(t *testing.T, url string, modelName string, messages []ChatMessage, headers map[string]string) *ChatCompletionsResponse {

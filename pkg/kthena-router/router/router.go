@@ -874,9 +874,6 @@ func proxyRequest(
 			c.Header(k, v)
 		}
 	}
-	if backendPodName != "" && sessionsticky.ExposeBackendPodHeader() {
-		c.Header("X-Kthena-Backend-Pod", backendPodName)
-	}
 	defer resp.Body.Close()
 
 	c.Status(resp.StatusCode)
