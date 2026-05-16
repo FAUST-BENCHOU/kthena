@@ -575,8 +575,6 @@ func TestGetExistingPodGroups(t *testing.T) {
 		manager := NewManager(nil, fakeVolcanoClient, apiextfake, nil)
 		manager.PodGroupLister = nil // Force fallback to live list
 
-		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
-
 		assert.Nil(t, manager.GetPodGroupLister(), "fallback test requires PodGroup lister to be uninitialized")
 
 		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
