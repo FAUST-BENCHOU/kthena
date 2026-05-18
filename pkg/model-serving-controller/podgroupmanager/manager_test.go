@@ -1396,12 +1396,10 @@ func newMinimalMSWithGroupTopology(mode string) *workloadv1alpha1.ModelServing {
 // TestUpdatePodGroupNetworkTopologyBehavior verifies that updatePodGroupIfNeeded syncs
 // Spec.NetworkTopology from ModelServing spec.template.networkTopology.groupPolicy.
 func TestUpdatePodGroupNetworkTopologyBehavior(t *testing.T) {
-	oldTopology := &schedulingv1beta1.NetworkTopologySpec{
-		Mode: schedulingv1beta1.NetworkTopologyMode("old-mode"),
-	}
-	newTopology := &schedulingv1beta1.NetworkTopologySpec{
-		Mode: schedulingv1beta1.NetworkTopologyMode("new-mode"),
-	}
+	const (
+		oldMode = schedulingv1beta1.NetworkTopologyMode("old-mode")
+		newMode = schedulingv1beta1.NetworkTopologyMode("new-mode")
+	)
 
 	buildExistingPG := func(topology *schedulingv1beta1.NetworkTopologySpec) *schedulingv1beta1.PodGroup {
 		return &schedulingv1beta1.PodGroup{
@@ -1433,46 +1431,67 @@ func TestUpdatePodGroupNetworkTopologyBehavior(t *testing.T) {
 		return mgr, fakeVolcano
 	}
 
-	t.Run("groupPolicy change updates Spec.NetworkTopology", func(t *testing.T) {
-		pg := buildExistingPG(oldTopology.DeepCopy())
-		mgr, fakeVolcano := setupManager(pg)
-		ms := newMinimalMSWithGroupTopology("new-mode")
+	tests := []struct {
+		name              string
+		existingTopology  *schedulingv1beta1.NetworkTopologySpec
+		groupTopologyMode string
+		wantTopologyNil   bool
+		wantTopologyMode  schedulingv1beta1.NetworkTopologyMode
+	}{
+		{
+			name: "groupPolicy change updates Spec.NetworkTopology",
+			existingTopology: &schedulingv1beta1.NetworkTopologySpec{
+				Mode: oldMode,
+			},
+			groupTopologyMode: "new-mode",
+			wantTopologyMode:  newMode,
+		},
+		{
+			name: "topology removed clears Spec.NetworkTopology",
+			existingTopology: &schedulingv1beta1.NetworkTopologySpec{
+				Mode: oldMode,
+			},
+			groupTopologyMode: "",
+			wantTopologyNil:   true,
+		},
+		{
+			name:              "topology added when absent sets Spec.NetworkTopology",
+			existingTopology:  nil,
+			groupTopologyMode: "new-mode",
+			wantTopologyMode:  newMode,
+		},
+	}
 
-		err := mgr.updatePodGroupIfNeeded(context.Background(), pg, ms)
-		assert.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var existingTopology *schedulingv1beta1.NetworkTopologySpec
+			if tt.existingTopology != nil {
+				existingTopology = tt.existingTopology.DeepCopy()
+			}
+			pg := buildExistingPG(existingTopology)
+			mgr, fakeVolcano := setupManager(pg)
 
-		updated, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(
-			context.Background(), "test-pg", metav1.GetOptions{})
-		assert.NoError(t, err)
-		assert.Equal(t, newTopology.Mode, updated.Spec.NetworkTopology.Mode)
-	})
+			var ms *workloadv1alpha1.ModelServing
+			if tt.groupTopologyMode == "" {
+				ms = newMinimalMS("")
+			} else {
+				ms = newMinimalMSWithGroupTopology(tt.groupTopologyMode)
+			}
 
-	t.Run("topology removed clears Spec.NetworkTopology", func(t *testing.T) {
-		pg := buildExistingPG(oldTopology.DeepCopy())
-		mgr, fakeVolcano := setupManager(pg)
-		ms := newMinimalMS("")
+			err := mgr.updatePodGroupIfNeeded(context.Background(), pg, ms)
+			assert.NoError(t, err)
 
-		err := mgr.updatePodGroupIfNeeded(context.Background(), pg, ms)
-		assert.NoError(t, err)
+			updated, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(
+				context.Background(), "test-pg", metav1.GetOptions{})
+			assert.NoError(t, err)
 
-		updated, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(
-			context.Background(), "test-pg", metav1.GetOptions{})
-		assert.NoError(t, err)
-		assert.Nil(t, updated.Spec.NetworkTopology)
-	})
-
-	t.Run("topology added when absent sets Spec.NetworkTopology", func(t *testing.T) {
-		pg := buildExistingPG(nil)
-		mgr, fakeVolcano := setupManager(pg)
-		ms := newMinimalMSWithGroupTopology("new-mode")
-
-		err := mgr.updatePodGroupIfNeeded(context.Background(), pg, ms)
-		assert.NoError(t, err)
-
-		updated, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(
-			context.Background(), "test-pg", metav1.GetOptions{})
-		assert.NoError(t, err)
-		assert.NotNil(t, updated.Spec.NetworkTopology)
-		assert.Equal(t, schedulingv1beta1.NetworkTopologyMode("new-mode"), updated.Spec.NetworkTopology.Mode)
-	})
+			if tt.wantTopologyNil {
+				assert.Nil(t, updated.Spec.NetworkTopology)
+				return
+			}
+			if assert.NotNil(t, updated.Spec.NetworkTopology) {
+				assert.Equal(t, tt.wantTopologyMode, updated.Spec.NetworkTopology.Mode)
+			}
+		})
+	}
 }
