@@ -186,7 +186,7 @@ func TestGetTargetLabels(t *testing.T) {
 			wantErr: false,
 			wantNil: false,
 			wantMatchLabel: map[string]string{
-				"app":                            "router",
+				"app":                             "router",
 				workload.ModelServingNameLabelKey: "model4",
 				workload.EntryLabelKey:            Entry,
 			},
