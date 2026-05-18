@@ -231,7 +231,6 @@ type Store interface {
 	GetHTTPRoute(key string) *gatewayv1.HTTPRoute
 	GetAllHTTPRoutes() []*gatewayv1.HTTPRoute
 	GetHTTPRoutesByGateway(gatewayKey string) []*gatewayv1.HTTPRoute
-	GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRoute
 
 	// GetModelNames returns all model names registered via ModelRoutes,
 	// including both base model names and LoRA adapter names.
@@ -1802,32 +1801,6 @@ func (s *store) GetHTTPRoutesByGateway(gatewayKey string) []*gatewayv1.HTTPRoute
 		for routeKey := range routeSet {
 			if hr, ok := s.httpRoutes[routeKey]; ok {
 				result = append(result, hr)
-			}
-		}
-	}
-	return result
-}
-
-func (s *store) GetModelRoutesByGateway(gatewayKey string) []*aiv1alpha1.ModelRoute {
-	s.routeMutex.RLock()
-	defer s.routeMutex.RUnlock()
-
-	var result []*aiv1alpha1.ModelRoute
-	if routeSet, exists := s.gatewayModelRoutes[gatewayKey]; exists {
-		for routeKey := range routeSet {
-			// Find the ModelRoute in routes or loraRoutes
-			if info, ok := s.routeInfo[routeKey]; ok {
-				// Try to find from primary model routes
-				if info.model != "" {
-					if routes, exists := s.routes[info.model]; exists {
-						for _, route := range routes {
-							if route.Namespace+"/"+route.Name == routeKey {
-								result = append(result, route)
-								break
-							}
-						}
-					}
-				}
 			}
 		}
 	}
