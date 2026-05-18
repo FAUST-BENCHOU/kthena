@@ -302,7 +302,7 @@ func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 		podGroup.Spec.Queue = queue
 	}
 
-	syncPodGroupGroupNetworkTopology(ms, &podGroup.Spec)
+	syncPodGroupNetworkTopology(ms, &podGroup.Spec)
 
 	if m.hasSubGroupPolicy.Load() {
 		podGroup = appendSubGroupPolicy(ms, podGroup, minRoleMember)
@@ -437,7 +437,7 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 		// When the queue annotation is removed (or set to empty) queue field is set to empty string.
 		updated.Spec.Queue = extractQueueName(ms)
 
-		syncPodGroupGroupNetworkTopology(ms, &updated.Spec)
+		syncPodGroupNetworkTopology(ms, &updated.Spec)
 
 		// Apply network topology policy
 		if m.hasSubGroupPolicy.Load() {
@@ -583,7 +583,7 @@ func podGroupCRDHasSubGroup(crd *apiextv1.CustomResourceDefinition) bool {
 	return false
 }
 
-// syncPodGroupGroupNetworkTopology sets or clears PodGroup group-level NetworkTopology
+// syncPodGroupNetworkTopology sets or clears PodGroup group-level NetworkTopology
 // from ModelServing spec.template.networkTopology.groupPolicy.
 func syncPodGroupNetworkTopology(ms *workloadv1alpha1.ModelServing, spec *schedulingv1beta1.PodGroupSpec) {
 	if ms.Spec.Template.NetworkTopology != nil && ms.Spec.Template.NetworkTopology.GroupPolicy != nil {
