@@ -212,7 +212,7 @@ func TestSchedulePDGroup(t *testing.T) {
 
 			// Create scheduling context with PDGroup enabled
 			ctx := &framework.Context{
-				Prompt: &common.ChatMessage{},
+				Prompt:          &common.ChatMessage{},
 				ModelServerName: modelServerName,
 				PDGroup: &aiv1alpha1.PDGroup{
 					GroupKey:      "pd-group",
