@@ -2330,13 +2330,17 @@ func TestModelServingStatusAwarePriorityScaleDownServingGroup(t *testing.T) {
 
 	for i := 1; i < len(podList.Items); i++ {
 		pod := podList.Items[i]
-		_, err := kubeClient.CoreV1().Pods(testNamespace).Patch(ctx, pod.Name, types.StrategicMergePatchType, patchTrue, metav1.PatchOptions{}, "status")
+		patchCtx, cancel := context.WithTimeout(ctx, utils.DefaultAPICallTimeout)
+		_, err := kubeClient.CoreV1().Pods(testNamespace).Patch(patchCtx, pod.Name, types.StrategicMergePatchType, patchTrue, metav1.PatchOptions{}, "status")
+		cancel()
 		require.NoError(t, err, "Failed to patch readiness gate for pod %s", pod.Name)
 	}
 
 	t.Log("Waiting for controller to observe the state (3 Ready, 1 NotReady)")
 	require.Eventually(t, func() bool {
-		ms, getErr := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		getCtx, cancel := context.WithTimeout(ctx, utils.DefaultAPICallTimeout)
+		defer cancel()
+		ms, getErr := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(getCtx, modelServing.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return false
 		}
@@ -2407,13 +2411,17 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 
 	for i := 1; i < len(podList.Items); i++ {
 		pod := podList.Items[i]
-		_, err := kubeClient.CoreV1().Pods(testNamespace).Patch(ctx, pod.Name, types.StrategicMergePatchType, patchTrue, metav1.PatchOptions{}, "status")
+		patchCtx, cancel := context.WithTimeout(ctx, utils.DefaultAPICallTimeout)
+		_, err := kubeClient.CoreV1().Pods(testNamespace).Patch(patchCtx, pod.Name, types.StrategicMergePatchType, patchTrue, metav1.PatchOptions{}, "status")
+		cancel()
 		require.NoError(t, err, "Failed to patch readiness gate for pod %s", pod.Name)
 	}
 
 	t.Log("Waiting for controller to observe the state")
 	require.Eventually(t, func() bool {
-		ms, getErr := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		getCtx, cancel := context.WithTimeout(ctx, utils.DefaultAPICallTimeout)
+		defer cancel()
+		ms, getErr := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(getCtx, modelServing.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return false
 		}

@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	defaultPollingInterval = 5 * time.Second
+	defaultPollingInterval = 2 * time.Second
 	DefaultAPICallTimeout  = 10 * time.Second
 )
 
@@ -69,14 +69,14 @@ func WaitForModelServingReady(t *testing.T, ctx context.Context, kthenaClient *c
 func WaitForModelServingSpecReplicas(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, namespace, name string, want int32, timeout time.Duration) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		getCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		getCtx, cancel := context.WithTimeout(ctx, DefaultAPICallTimeout)
 		defer cancel()
 		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Get(getCtx, name, metav1.GetOptions{})
 		if err != nil || ms.Spec.Replicas == nil {
 			return false
 		}
 		return *ms.Spec.Replicas == want
-	}, timeout, 10*time.Second, "ModelServing %s/%s spec.replicas should converge to %d", namespace, name, want)
+	}, timeout, defaultPollingInterval, "ModelServing %s/%s spec.replicas should converge to %d", namespace, name, want)
 }
 
 // IsPodReady checks if a pod is in Running phase and has PodReady condition set to True.
