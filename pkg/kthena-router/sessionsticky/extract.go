@@ -58,10 +58,8 @@ func extractOne(c *gin.Context, src *networkingv1alpha1.SessionKeySource) string
 	case networkingv1alpha1.SessionKeySourceQuery:
 		return strings.TrimSpace(req.URL.Query().Get(src.Name))
 	case networkingv1alpha1.SessionKeySourceCookie:
-		for _, ck := range req.Cookies() {
-			if ck.Name == src.Name {
-				return strings.TrimSpace(ck.Value)
-			}
+		if ck, err := req.Cookie(src.Name); err == nil {
+			return strings.TrimSpace(ck.Value)
 		}
 		return ""
 	case networkingv1alpha1.SessionKeySourceJWTClaim:
