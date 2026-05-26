@@ -64,7 +64,9 @@ type ModelRouteSpec struct {
 // SessionSticky configures per-route session key extraction and binding TTL.
 // The backing store (memory vs Redis) is configured in the router process, not here.
 type SessionSticky struct {
-	// SessionAffinitySeconds is binding TTL in seconds. When unset, the default is 10800.
+	// SessionAffinitySeconds is binding TTL in seconds.
+	// Once the session has been idle for more than the specified duration, the session becomes invalid.
+	// When unset, the default is 300 (5 minutes).
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	SessionAffinitySeconds *int32 `json:"sessionAffinitySeconds,omitempty"`

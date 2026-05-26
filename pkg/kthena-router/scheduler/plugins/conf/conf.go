@@ -39,6 +39,7 @@ type SessionStickyConfig struct {
 }
 
 // SessionStickyRedis holds Redis connection settings for shared session stickiness.
+// TODO(FAUST-BENCHOU): Support Redis password via a Kubernetes Secret reference when auth is required.
 type SessionStickyRedis struct {
 	Address string `yaml:"address"`
 }

@@ -59,67 +59,57 @@ type memoryEntry struct {
 	until time.Time
 }
 
-// MemoryStore is a process-local TTL map.
+// MemoryStore is a process-local TTL map with a background sweeper.
 type MemoryStore struct {
-	mu        sync.RWMutex
-	m         map[string]memoryEntry
-	lastSweep time.Time
+	mu     sync.RWMutex
+	m      map[string]memoryEntry
+	stopCh chan struct{}
+	wg     sync.WaitGroup
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{m: make(map[string]memoryEntry)}
+	s := &MemoryStore{
+		m:      make(map[string]memoryEntry),
+		stopCh: make(chan struct{}),
+	}
+	s.wg.Add(1)
+	go s.sweepLoop()
+	return s
 }
 
-// sweepExpiredLocked removes all expired entries. Caller must hold the write lock.
-func (s *MemoryStore) sweepExpiredLocked(now time.Time) {
+func (s *MemoryStore) sweepLoop() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(memorySweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.sweepExpired()
+		}
+	}
+}
+
+func (s *MemoryStore) sweepExpired() {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for k, e := range s.m {
 		if !e.until.After(now) {
 			delete(s.m, k)
 		}
 	}
-	s.lastSweep = now
-}
-
-// maybeSweepExpiredLocked runs a full sweep at most once per memorySweepInterval.
-// Caller must hold the write lock.
-func (s *MemoryStore) maybeSweepExpiredLocked(now time.Time) {
-	if !s.lastSweep.IsZero() && now.Sub(s.lastSweep) < memorySweepInterval {
-		return
-	}
-	s.sweepExpiredLocked(now)
 }
 
 func (s *MemoryStore) Get(_ context.Context, key string) (string, bool) {
-	now := time.Now()
-
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	e, ok := s.m[key]
-	if !ok {
-		s.mu.RUnlock()
+	if !ok || !e.until.After(time.Now()) {
 		return "", false
 	}
-	if e.until.After(now) {
-		pod := e.pod
-		s.mu.RUnlock()
-		return pod, true
-	}
-	s.mu.RUnlock()
-
-	// Expired for this key: upgrade to write lock and delete only that entry.
-	// Re-check after lock in case another goroutine refreshed the binding.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok = s.m[key]
-	if !ok {
-		return "", false
-	}
-	if e.until.After(now) {
-		return e.pod, true
-	}
-	pod := e.pod
-	delete(s.m, key)
-	klog.InfoS("session sticky: binding expired", "key", key, "pod", pod)
-	return "", false
+	return e.pod, true
 }
 
 func (s *MemoryStore) Delete(_ context.Context, key string) {
@@ -137,7 +127,6 @@ func (s *MemoryStore) Commit(_ context.Context, key, podName string, ttl time.Du
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.maybeSweepExpiredLocked(now)
 
 	cur, ok := s.m[key]
 	if ok && cur.until.After(now) {
@@ -151,7 +140,15 @@ func (s *MemoryStore) Commit(_ context.Context, key, podName string, ttl time.Du
 	return podName, nil
 }
 
-func (s *MemoryStore) Close() error { return nil }
+func (s *MemoryStore) Close() error {
+	select {
+	case <-s.stopCh:
+	default:
+		close(s.stopCh)
+		s.wg.Wait()
+	}
+	return nil
+}
 
 // RedisStore uses Redis with compare-and-refresh semantics in a Lua script.
 type RedisStore struct {

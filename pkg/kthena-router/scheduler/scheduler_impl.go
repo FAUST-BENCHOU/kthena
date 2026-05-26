@@ -143,7 +143,6 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		if len(pinned) > 0 {
 			pods = pinned
 		} else {
-			ctx.StickyPodMiss = true
 			ctx.StickyPodName = ""
 		}
 	}

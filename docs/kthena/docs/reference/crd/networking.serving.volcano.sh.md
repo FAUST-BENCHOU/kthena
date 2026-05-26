@@ -421,7 +421,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `sessionAffinitySeconds` _integer_ | SessionAffinitySeconds is binding TTL in seconds. When unset, the default is 10800. |  | Minimum: 1 <br /> |
+| `sessionAffinitySeconds` _integer_ | SessionAffinitySeconds is binding TTL in seconds.<br />Once the session has been idle for more than the specified duration, the session becomes invalid.<br />When unset, the default is 300 (5 minutes). |  | Minimum: 1 <br /> |
 | `sources` _[SessionKeySource](#sessionkeysource) array_ | Sources are evaluated in order; the first non-empty extracted value is the session key. |  | MaxItems: 16 <br /> |
 
 

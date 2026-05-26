@@ -44,8 +44,6 @@ type Context struct {
 
 	// StickyPodName, when set before scheduling, pins aggregated scheduling to that Pod if it survives filters.
 	StickyPodName string
-	// StickyPodMiss is true when a sticky hint did not match any filtered Pod.
-	StickyPodMiss bool
 
 	// MetricsRecorder for recording scheduler plugin metrics
 	MetricsRecorder *metrics.RequestMetricsRecorder

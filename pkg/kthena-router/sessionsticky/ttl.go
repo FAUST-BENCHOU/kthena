@@ -13,9 +13,9 @@ import (
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 )
 
-const defaultSessionAffinitySeconds int32 = 10800
+const defaultSessionAffinitySeconds int32 = 300
 
-// TTL returns binding TTL from spec.sessionAffinitySeconds, or 10800s when unset.
+// TTL returns binding TTL from spec.sessionAffinitySeconds, or 5 minutes when unset.
 func TTL(spec *networkingv1alpha1.SessionSticky) time.Duration {
 	sec := defaultSessionAffinitySeconds
 	if spec != nil && spec.SessionAffinitySeconds != nil && *spec.SessionAffinitySeconds >= 1 {

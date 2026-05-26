@@ -17,7 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/auth"
 )
 
 func TestExtractSessionKey_HeaderFirstWins(t *testing.T) {
@@ -35,7 +34,7 @@ func TestExtractSessionKey_HeaderFirstWins(t *testing.T) {
 			{Type: networkingv1alpha1.SessionKeySourceQuery, Name: "sid"},
 		},
 	}
-	got := ExtractSessionKey(c, spec, nil)
+	got := ExtractSessionKey(c, spec)
 	require.Equal(t, "a1", got)
 }
 
@@ -52,7 +51,7 @@ func TestExtractSessionKey_QueryFallback(t *testing.T) {
 			{Type: networkingv1alpha1.SessionKeySourceQuery, Name: "sid"},
 		},
 	}
-	require.Equal(t, "qval", ExtractSessionKey(c, spec, nil))
+	require.Equal(t, "qval", ExtractSessionKey(c, spec))
 }
 
 func TestExtractSessionKey_Cookie(t *testing.T) {
@@ -68,7 +67,7 @@ func TestExtractSessionKey_Cookie(t *testing.T) {
 			{Type: networkingv1alpha1.SessionKeySourceCookie, Name: "sid"},
 		},
 	}
-	require.Equal(t, "cval", ExtractSessionKey(c, spec, nil))
+	require.Equal(t, "cval", ExtractSessionKey(c, spec))
 }
 
 func TestExtractSessionKey_NilSpec(t *testing.T) {
@@ -76,7 +75,7 @@ func TestExtractSessionKey_NilSpec(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
-	require.Equal(t, "", ExtractSessionKey(c, nil, auth.NewJWTAuthenticator(nil)))
+	require.Equal(t, "", ExtractSessionKey(c, nil))
 }
 
 func TestMemoryStore_GetSetTTL(t *testing.T) {
