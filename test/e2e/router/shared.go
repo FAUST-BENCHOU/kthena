@@ -2128,14 +2128,16 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 		undoScale := scaleRouterDeployment(t, testCtx.KubeClient, kthenaNamespace, 2)
 		defer undoScale()
 
+		preRolloutPodNames := utils.SessionStickyPreRolloutRouterPodNames(t, testCtx.KubeClient, kthenaNamespace)
+
 		redisAddr := "redis-server:6379"
 		utils.SessionStickyPatchRouterConfigAndRollout(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testCtx.Namespace, utils.SessionStickyE2ERouterYAMLRedis(redisAddr), routercontext.ModelServer1_5bName, defaultScalingTimeout, reconnectRouter)
 		defer func() {
 			utils.SessionStickyPatchRouterConfigAndRollout(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testCtx.Namespace, utils.SessionStickyE2ERouterYAMLMemory(), routercontext.ModelServer1_5bName, defaultScalingTimeout, reconnectRouter)
 		}()
 
-		routerPods := utils.GetReadyRouterPods(t, testCtx.KubeClient, kthenaNamespace)
-		require.GreaterOrEqual(t, len(routerPods), 2, "need at least two router pods for cross-replica Redis sticky test")
+		routerPods := utils.SessionStickyWaitRouterReplicasAfterRollout(
+			t, testCtx.KubeClient, kthenaNamespace, preRolloutPodNames, 2, 2, defaultScalingTimeout)
 
 		pf0, err := utils.SetupPortForwardToPod(kthenaNamespace, routerPods[0].Name, "18080", "8080")
 		require.NoError(t, err)

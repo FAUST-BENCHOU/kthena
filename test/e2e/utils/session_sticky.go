@@ -274,6 +274,86 @@ func (c *SessionStickyRouterConn) Close() {
 	}
 }
 
+// SessionStickyPreRolloutRouterPodNames records current ready router pod names before a rollout.
+// Call before SessionStickyPatchRouterConfigAndRollout; pass the result to SessionStickyWaitRouterReplicasAfterRollout.
+func SessionStickyPreRolloutRouterPodNames(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace string) map[string]bool {
+	t.Helper()
+	preRolloutPods := GetReadyRouterPods(t, kubeClient, kthenaNamespace)
+	names := make(map[string]bool, len(preRolloutPods))
+	for _, pod := range preRolloutPods {
+		names[pod.Name] = true
+	}
+	return names
+}
+
+// SessionStickyWaitRouterReplicasAfterRollout waits until pre-rollout pods are replaced, the deployment
+// has expectedReplicas ready, and at least minPods stable (non-terminating, ready) router pods exist.
+// Matches the post-restart stabilization used in TestRouterConfigUpdateShared before port-forward.
+func SessionStickyWaitRouterReplicasAfterRollout(
+	t *testing.T,
+	kubeClient kubernetes.Interface,
+	kthenaNamespace string,
+	preRolloutPodNames map[string]bool,
+	expectedReplicas int32,
+	minPods int,
+	timeout time.Duration,
+) []corev1.Pod {
+	t.Helper()
+	if timeout <= 0 {
+		timeout = 3 * time.Minute
+	}
+	ctx := context.Background()
+	selector := sessionStickyRouterPodLabelSelector(t, kubeClient, kthenaNamespace)
+
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: selector,
+		})
+		if err != nil {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if preRolloutPodNames[pod.Name] {
+				return false
+			}
+		}
+		return len(pods.Items) > 0
+	}, timeout, 2*time.Second, "Pre-rollout router pods should be replaced after rollout")
+
+	WaitForDeploymentReady(t, ctx, kubeClient, kthenaNamespace, routerDeploymentName, expectedReplicas, timeout)
+	t.Logf("kthena-router deployment is ready with %d replicas after rollout", expectedReplicas)
+
+	var stablePods []corev1.Pod
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: selector,
+		})
+		if err != nil {
+			return false
+		}
+		stablePods = stablePods[:0]
+		for _, pod := range pods.Items {
+			if pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil {
+				continue
+			}
+			if IsPodReady(pod) {
+				stablePods = append(stablePods, pod)
+			}
+		}
+		return len(stablePods) >= minPods
+	}, timeout, 2*time.Second, "need at least %d stable router pods after rollout", minPods)
+
+	return stablePods
+}
+
+func sessionStickyRouterPodLabelSelector(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace string) string {
+	t.Helper()
+	ctx := context.Background()
+	dep, err := kubeClient.AppsV1().Deployments(kthenaNamespace).Get(ctx, routerDeploymentName, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get kthena-router deployment")
+	return metav1.FormatLabelSelector(dep.Spec.Selector)
+}
+
 // SessionStickyPatchRouterConfigAndRollout updates router config, rolls out, then runs afterRollout (e.g. reconnect port-forward).
 func SessionStickyPatchRouterConfigAndRollout(
 	t *testing.T,
