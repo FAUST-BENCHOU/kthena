@@ -36,7 +36,7 @@ const (
 	// SessionStickyModelRouteFile is the shared ModelRoute template for session-sticky E2E.
 	SessionStickyModelRouteFile = "ModelRoute-session-sticky.yaml"
 
-	// SessionStickyLogBindingExpired matches MemoryStore lazy TTL eviction (router stdout/stderr).
+	// SessionStickyLogBindingExpired matches MemoryStore background sweep of expired bindings.
 	SessionStickyLogBindingExpired = "session sticky: binding expired"
 )
 

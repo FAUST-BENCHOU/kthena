@@ -97,6 +97,7 @@ func (s *MemoryStore) sweepExpired() {
 	defer s.mu.Unlock()
 	for k, e := range s.m {
 		if !e.until.After(now) {
+			klog.InfoS("session sticky: binding expired", "key", k)
 			delete(s.m, k)
 		}
 	}

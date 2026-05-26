@@ -2118,7 +2118,7 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 		_ = utils.CheckChatCompletionsWithURLAndHeaders(t, routerConn.URL, mr.Spec.ModelName, messages, hdr)
 
 		utils.WaitForPodLogsContain(t, testCtx.KubeClient, kthenaNamespace, routerPod.Name, 2*time.Minute,
-			[]string{"session sticky bypassed for PD model"}, 90*time.Second, 2*time.Second)
+			[]string{"session sticky bypassed for PD disaggregated model"}, 90*time.Second, 2*time.Second)
 	})
 
 	t.Run("E2E_SS_09_MultiReplicaRedisStickyStore", func(t *testing.T) {
