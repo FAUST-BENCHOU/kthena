@@ -88,9 +88,7 @@ func TestParseMetricsUpdateInterval(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.envValue != "" {
-				t.Setenv("METRICS_UPDATE_INTERVAL", tc.envValue)
-			}
+			t.Setenv("METRICS_UPDATE_INTERVAL", tc.envValue)
 			got := parseMetricsUpdateInterval()
 			assert.Equal(t, tc.expected, got)
 		})
@@ -104,6 +102,7 @@ func TestNewStoreUsesMetricsUpdateInterval(t *testing.T) {
 }
 
 func TestNewStoreUsesDefaultMetricsUpdateInterval(t *testing.T) {
+	t.Setenv("METRICS_UPDATE_INTERVAL", "")
 	s := New().(*store)
 	assert.Equal(t, defaultUpdateInterval, s.metricsUpdateInterval)
 }
