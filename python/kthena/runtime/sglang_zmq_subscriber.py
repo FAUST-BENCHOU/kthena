@@ -23,25 +23,22 @@ import zmq.asyncio
 from msgspec.msgpack import Decoder
 
 from kthena.runtime.events import (
-    EventType, VLLMEventData, VLLMBlockStoredEvent,
-    VLLMBlockRemovedEvent, VLLMAllBlocksClearedEvent, get_event_publisher
+    EventType, SGLangEventData, SGLangBlockStoredEvent,
+    SGLangBlockRemovedEvent, SGLangAllBlocksClearedEvent, get_event_publisher
 )
-from kthena.runtime.vllm_config import get_vllm_config
+from kthena.runtime.sglang_config import get_sglang_config
 
 logger = logging.getLogger(__name__)
-
 
 class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
     ts: float
     events: list[Any]
-    data_parallel_rank: Optional[int] = None
-
+    attn_dp_rank: Optional[int] = None
 
 class KVCacheEvent(
     msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag=True
 ):
     pass
-
 
 class BlockStored(KVCacheEvent):
     block_hashes: list[int]
@@ -49,24 +46,21 @@ class BlockStored(KVCacheEvent):
     token_ids: list[int]
     block_size: int
     lora_id: Optional[int]
-
+    medium: Optional[str] = None
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[int]
-
+    medium: Optional[str] = None
 
 class AllBlocksCleared(KVCacheEvent):
     pass
 
-
 class KVEventBatch(EventBatch):
     events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
 
-
-class VLLMZMQSubscriber:
-
+class SGLangZMQSubscriber:
     def __init__(self, pod_identifier: str, model_name: str):
-        self.config = get_vllm_config(pod_identifier, model_name)
+        self.config = get_sglang_config(pod_identifier, model_name)
         self.context: Optional[zmq.asyncio.Context] = None
         self.socket: Optional[zmq.asyncio.Socket] = None
         self.running = False
@@ -78,7 +72,7 @@ class VLLMZMQSubscriber:
     async def start(self) -> None:
         async with self._connection_lock:
             if self.running:
-                logger.warning("vLLM ZMQ subscriber is already running")
+                logger.warning("SGLang ZMQ subscriber is already running")
                 return
 
             self.running = True
@@ -90,20 +84,18 @@ class VLLMZMQSubscriber:
                 await self._run_subscriber()
                 break
             except asyncio.CancelledError:
-                logger.info("vLLM ZMQ subscriber cancelled")
+                logger.info("SGLang ZMQ subscriber cancelled")
                 break
             except Exception as e:
                 retry_count += 1
-                logger.error(f"vLLM ZMQ subscriber error (attempt {retry_count}): {e}")
-
+                logger.error(f"SGLang ZMQ subscriber error (attempt {retry_count}): {e}")
                 if self.running and (self.config.zmq_max_retries == -1 or retry_count < self.config.zmq_max_retries):
                     try:
                         await asyncio.wait_for(self._shutdown_event.wait(), timeout=self.config.zmq_retry_interval)
                         break
                     except asyncio.TimeoutError:
                         continue
-
-        logger.info("vLLM ZMQ subscriber stopped")
+        logger.info("SGLang ZMQ subscriber stopped")
 
     async def stop(self) -> None:
         async with self._connection_lock:
@@ -141,7 +133,9 @@ class VLLMZMQSubscriber:
             self.socket.setsockopt_string(zmq.SUBSCRIBE, self.config.zmq_topic_filter)
             self.socket.setsockopt(zmq.RCVTIMEO, self.config.zmq_poll_timeout)
 
-            logger.info(f"Connected to ZMQ endpoint: {self.config.zmq_endpoint}")
+            logger.info(f"Connected to SGLang ZMQ endpoint: {self.config.zmq_endpoint}")
+
+            expected_topic = self.config.zmq_topic_filter
 
             while self.running:
                 try:
@@ -151,7 +145,7 @@ class VLLMZMQSubscriber:
                         continue
 
                     topic, payload = self._extract_message_data(parts)
-                    if not topic or topic != "kv-events":
+                    if expected_topic and topic != expected_topic:
                         continue
 
                     await self._process_message(payload, self.config.pod_identifier, self.config.model_name)
@@ -160,16 +154,16 @@ class VLLMZMQSubscriber:
                     await asyncio.sleep(0.001)
                     continue
                 except asyncio.CancelledError:
-                    logger.info("ZMQ subscriber cancelled")
+                    logger.info("SGLang ZMQ subscriber cancelled")
                     break
                 except Exception as e:
-                    logger.error(f"Error receiving vLLM ZMQ message: {e}")
+                    logger.error(f"Error receiving SGLang ZMQ message: {e}")
                     if not self.running:
                         break
                     await asyncio.sleep(0.1)
 
         except Exception as e:
-            logger.error(f"Error in ZMQ subscriber: {e}")
+            logger.error(f"Error in SGLang ZMQ subscriber: {e}")
             raise
         finally:
             await self._cleanup_connection()
@@ -202,73 +196,74 @@ class VLLMZMQSubscriber:
 
             events_count = len(event_batch.events) if event_batch.events else 0
             logger.debug(
-                f"Received event batch: ts={event_batch.ts}, events_count={events_count}, "
-                f"dp_rank={event_batch.data_parallel_rank}")
+                f"Received SGLang event batch: ts={event_batch.ts}, events_count={events_count}, "
+                f"attn_dp_rank={event_batch.attn_dp_rank}")
 
             if events_count == 0:
-                logger.debug("Empty event batch received")
+                logger.debug("Empty SGLang event batch received")
                 return
 
             for i, event in enumerate(event_batch.events):
                 try:
-                    logger.debug(f"Processing event {i}: type={type(event).__name__}")
+                    logger.debug(f"Processing SGLang event {i}: type={type(event).__name__}")
                     await self._process_event(event, event_batch.ts, pod_identifier, model_name,
-                                              event_batch.data_parallel_rank)
+                                              event_batch.attn_dp_rank)
                 except (ValueError, TypeError, AttributeError) as e:
-                    logger.error(f"Error processing event {i}: {e}")
+                    logger.error(f"Error processing SGLang event {i}: {e}")
                 except Exception as e:
-                    logger.error(f"Unexpected error processing event {i}: {e}", exc_info=True)
+                    logger.error(f"Unexpected error processing SGLang event {i}: {e}", exc_info=True)
 
         except Exception as e:
-            logger.error(f"Error processing message: {e}", exc_info=True)
+            logger.error(f"Error processing SGLang message: {e}", exc_info=True)
 
     async def _process_event(self, event: Any, timestamp: float,
                              pod_identifier: str, model_name: str,
-                             data_parallel_rank: Optional[int]) -> None:
+                             attn_dp_rank: Optional[int]) -> None:
         if not event:
-            logger.warning("Empty event received")
+            logger.warning("Empty SGLang event received")
             return
 
         try:
             if isinstance(event, BlockStored):
-
-                vllm_event = VLLMBlockStoredEvent(
+                sglang_event = SGLangBlockStoredEvent(
                     block_hashes=event.block_hashes,
                     parent_block_hash=event.parent_block_hash,
                     token_ids=event.token_ids,
                     block_size=event.block_size,
-                    lora_id=event.lora_id
+                    lora_id=event.lora_id,
+                    medium=event.medium,
                 )
-                event_type = EventType.VLLM_BLOCK_STORED
+                event_type = EventType.SGLANG_BLOCK_STORED
 
             elif isinstance(event, BlockRemoved):
-                vllm_event = VLLMBlockRemovedEvent(
-                    block_hashes=event.block_hashes
+                sglang_event = SGLangBlockRemovedEvent(
+                    block_hashes=event.block_hashes,
+                    medium=event.medium,
                 )
-                event_type = EventType.VLLM_BLOCK_REMOVED
+                event_type = EventType.SGLANG_BLOCK_REMOVED
 
             elif isinstance(event, AllBlocksCleared):
-                vllm_event = VLLMAllBlocksClearedEvent()
-                event_type = EventType.VLLM_ALL_BLOCKS_CLEARED
+                sglang_event = SGLangAllBlocksClearedEvent()
+                event_type = EventType.SGLANG_ALL_BLOCKS_CLEARED
 
             else:
-                logger.debug(f"Unknown vLLM event type: {type(event)}")
+                logger.debug(f"Unknown SGLang event type: {type(event)}")
                 return
 
-            event_data_obj = VLLMEventData(
+            event_data_obj = SGLangEventData(
                 event_type=event_type,
                 timestamp=datetime.fromtimestamp(timestamp),
                 model_name=model_name,
                 pod_identifier=pod_identifier,
-                data_parallel_rank=data_parallel_rank,
-                vllm_event=vllm_event
+                attn_dp_rank=attn_dp_rank,
+                sglang_event=sglang_event,
             )
 
             await self.event_publisher.publish(event_data_obj)
 
         except Exception as e:
-            logger.error(f"Error processing vLLM event: {e}", exc_info=True)
+            logger.error(f"Error processing SGLang event: {e}", exc_info=True)
 
 
-def get_vllm_zmq_subscriber(pod_identifier: str, model_name: str) -> VLLMZMQSubscriber:
-    return VLLMZMQSubscriber(pod_identifier, model_name)
+def get_sglang_zmq_subscriber(pod_identifier: str, model_name: str) -> SGLangZMQSubscriber:
+    return SGLangZMQSubscriber(pod_identifier, model_name)

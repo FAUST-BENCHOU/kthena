@@ -15,25 +15,25 @@
 import os
 from dataclasses import dataclass
 
-DEFAULT_VLLM_ZMQ_ENDPOINT = "tcp://localhost:5557"
-DEFAULT_VLLM_ZMQ_TOPIC_FILTER = "kv-events"
+DEFAULT_SGLANG_ZMQ_ENDPOINT = "tcp://localhost:5557"
+DEFAULT_SGLANG_ZMQ_TOPIC_FILTER = ""
 
 
 @dataclass(frozen=True)
-class VLLMConfig:
+class SGLangConfig:
     pod_identifier: str
     model_name: str
-    zmq_endpoint: str = DEFAULT_VLLM_ZMQ_ENDPOINT
-    zmq_topic_filter: str = DEFAULT_VLLM_ZMQ_TOPIC_FILTER
+    zmq_endpoint: str = DEFAULT_SGLANG_ZMQ_ENDPOINT
+    zmq_topic_filter: str = DEFAULT_SGLANG_ZMQ_TOPIC_FILTER
     zmq_retry_interval: float = 5.0
     zmq_poll_timeout: int = 250
     zmq_max_retries: int = -1
 
 
-def get_vllm_config(pod_identifier: str, model_name: str) -> VLLMConfig:
-    return VLLMConfig(
+def get_sglang_config(pod_identifier: str, model_name: str) -> SGLangConfig:
+    return SGLangConfig(
         pod_identifier=pod_identifier,
         model_name=model_name,
-        zmq_endpoint=os.getenv("VLLM_ZMQ_ENDPOINT", DEFAULT_VLLM_ZMQ_ENDPOINT),
-        zmq_topic_filter=os.getenv("VLLM_ZMQ_TOPIC_FILTER", DEFAULT_VLLM_ZMQ_TOPIC_FILTER),
+        zmq_endpoint=os.getenv("SGLANG_ZMQ_ENDPOINT", DEFAULT_SGLANG_ZMQ_ENDPOINT),
+        zmq_topic_filter=os.getenv("SGLANG_ZMQ_TOPIC_FILTER", DEFAULT_SGLANG_ZMQ_TOPIC_FILTER),
     )
