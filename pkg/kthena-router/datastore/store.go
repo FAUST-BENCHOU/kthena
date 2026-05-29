@@ -62,8 +62,6 @@ var (
 )
 
 const (
-	defaultQueueQPS = 100 //nolint:unused // pre-existing constant kept for future use
-
 	// defaultMetricsScrapeInterval is the default polling interval for pod metrics.
 	defaultMetricsScrapeInterval = 1 * time.Second
 	metricsScrapeIntervalEnv     = "METRICS_SCRAPE_INTERVAL"
@@ -474,6 +472,8 @@ func parseMetricsScrapeInterval() time.Duration {
 func (s *store) Run(ctx context.Context) {
 	s.rootCtx = ctx
 	go func() {
+		ticker := time.NewTicker(s.metricsScrapeInterval)
+		defer ticker.Stop()
 		for {
 			s.pods.Range(func(key, value any) bool {
 				if p, ok := value.(*PodInfo); ok {
@@ -483,12 +483,10 @@ func (s *store) Run(ctx context.Context) {
 				return true
 			})
 			s.initialSynced.Store(true)
-			t := time.NewTimer(s.metricsScrapeInterval)
 			select {
 			case <-ctx.Done():
-				t.Stop()
 				return
-			case <-t.C:
+			case <-ticker.C:
 			}
 		}
 	}()
