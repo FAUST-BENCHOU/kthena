@@ -1079,8 +1079,7 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		}
 	}
 	if userId == "" {
-		c.AbortWithStatusJSON(http.StatusBadRequest, "missing userId in request body")
-		return fmt.Errorf("missing userId in request body")
+		klog.Warningf("user ID not found in request %s", requestID)
 	}
 
 	klog.V(4).Infof("[FairnessScheduling] incoming request: reqID=%s user=%s model=%s",
