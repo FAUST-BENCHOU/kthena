@@ -89,6 +89,11 @@ type Router struct {
 	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
 }
 
+// ActiveRequestCount returns the number of requests currently being handled by the router.
+func (r *Router) ActiveRequestCount() int64 {
+	return r.metrics.ActiveRequestsCount()
+}
+
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	// Create a unified rate limiter for all models
 	loadRateLimiter := ratelimit.NewTokenRateLimiter()
@@ -204,6 +209,9 @@ type ModelRequest map[string]interface{}
 
 func (r *Router) HandlerFunc() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		r.metrics.IncActiveRequests()
+		defer r.metrics.DecActiveRequests()
+
 		// Handle /v1/models endpoint (OpenAI-compatible model listing)
 		if c.Request.Method == http.MethodGet &&
 			(c.Request.URL.Path == "/v1/models" || c.Request.URL.Path == "/models") {

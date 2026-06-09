@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -71,7 +72,11 @@ type Metrics struct {
 	// Rate limiting metrics
 	RateLimitExceeded prometheus.CounterVec
 
-	// Request and scheduling metrics
+	// Request and scheduling metrics.
+	// activeRequests is the source of truth (inc/dec, shutdown drain count).
+	// ActiveRequests is the Prometheus GaugeFunc that reads activeRequests on scrape.
+	activeRequests           atomic.Int64
+	ActiveRequests           prometheus.GaugeFunc
 	ActiveDownstreamRequests prometheus.GaugeVec
 	ActiveUpstreamRequests   prometheus.GaugeVec
 	FairnessQueueSize        prometheus.GaugeVec
@@ -90,7 +95,7 @@ type Metrics struct {
 
 // NewMetrics creates a new Metrics instance with all Prometheus metrics registered
 func NewMetrics() *Metrics {
-	return &Metrics{
+	m := &Metrics{
 		RequestsTotal: *promauto.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "kthena_router_requests_total",
@@ -232,6 +237,18 @@ func NewMetrics() *Metrics {
 			[]string{LabelModel, LabelEngine},
 		),
 	}
+
+	m.ActiveRequests = promauto.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "kthena_router_active_requests",
+			Help: "Current number of active requests being handled by the router",
+		},
+		func() float64 {
+			return float64(m.activeRequests.Load())
+		},
+	)
+
+	return m
 }
 
 // RecordRequest records a completed request with all relevant metrics
@@ -268,6 +285,26 @@ func (m *Metrics) RecordRateLimitExceeded(model, limitType, path string) {
 // RecordSchedulerPluginDuration records the processing time for a specific scheduler plugin
 func (m *Metrics) RecordSchedulerPluginDuration(model, pluginName, pluginType string, duration time.Duration) {
 	m.SchedulerPluginDuration.WithLabelValues(model, pluginName, pluginType).Observe(duration.Seconds())
+}
+
+// SetActiveRequests sets the current number of active router requests.
+func (m *Metrics) SetActiveRequests(count float64) {
+	m.activeRequests.Store(int64(count))
+}
+
+// IncActiveRequests increments the active request count by 1.
+func (m *Metrics) IncActiveRequests() {
+	m.activeRequests.Add(1)
+}
+
+// DecActiveRequests decrements the active request count by 1.
+func (m *Metrics) DecActiveRequests() {
+	m.activeRequests.Add(-1)
+}
+
+// ActiveRequestsCount returns the current value of the active requests atomic counter.
+func (m *Metrics) ActiveRequestsCount() int64 {
+	return m.activeRequests.Load()
 }
 
 // SetActiveDownstreamRequests sets the current number of active downstream requests
