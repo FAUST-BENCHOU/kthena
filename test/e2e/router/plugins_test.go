@@ -19,6 +19,7 @@ package router
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -166,10 +167,20 @@ func TestSchedulerPluginLeastLatency(t *testing.T) {
 	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins-latency.yaml")
 	model := route.Spec.ModelName
 
-	// Prime both backends while idle so the router records TTFT/TPOT; do not saturate either pool.
+	// Prime both backends while idle so the router records TTFT/TPOT; parallelize to cut wall time.
 	const primeRequests = 40
-	utils.DirectChatToPod(t, fastPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-fast-prime", primeRequests)
-	utils.DirectChatToPod(t, slowPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-slow-prime", primeRequests)
+	const primeConcurrency = 5
+	var primeWG sync.WaitGroup
+	primeWG.Add(2)
+	go func() {
+		defer primeWG.Done()
+		utils.DirectChatToPodConcurrent(t, fastPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-fast-prime", primeRequests, primeConcurrency)
+	}()
+	go func() {
+		defer primeWG.Done()
+		utils.DirectChatToPodConcurrent(t, slowPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-slow-prime", primeRequests, primeConcurrency)
+	}()
+	primeWG.Wait()
 	time.Sleep(3 * time.Second)
 
 	since := metav1.NewTime(time.Now())
