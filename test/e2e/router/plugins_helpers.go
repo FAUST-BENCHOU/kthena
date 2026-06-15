@@ -44,7 +44,7 @@ const (
 	gpuCacheUsageBusyMin           = 0.1
 	gpuCacheUsageIdleMax           = 0.05
 	gpuCacheUsageLoadWaitTimeout   = 90 * time.Second
-	gpuCacheUsageLoadConcurrency   = 6
+	gpuCacheUsageLoadConcurrency   = 2
 	gpuCacheUsageLoadMaxTokens     = 256
 )
 
@@ -55,6 +55,9 @@ func listReadyMockPods(t *testing.T, kube kubernetes.Interface, namespace string
 	return ready
 }
 
+// pluginMockKVCacheSimArgs enables KV-cache simulation with the same fast latency as
+// LLM-Mock-plugins.yaml so probe traffic stays quick; sustained long streaming load
+// keeps busy replicas hot without slow per-token delays.
 var pluginMockKVCacheSimArgs = []string{
 	"--model=kthena-plugin-mock",
 	"--served-model-name=router-plugin-model",
@@ -65,8 +68,8 @@ var pluginMockKVCacheSimArgs = []string{
 	"--kv-cache-size=8",
 	"--block-size=8",
 	"--max-num-seqs=2",
-	"--time-to-first-token=2s",
-	"--inter-token-latency=200ms",
+	"--time-to-first-token=50ms",
+	"--inter-token-latency=10ms",
 }
 
 // applyPluginMockKVCacheProfile patches the shared plugin mock deployment for gpu-usage e2e

@@ -106,8 +106,8 @@ func TestSchedulerPluginLeastRequest(t *testing.T) {
 }
 
 // TestSchedulerPluginGPUCacheUsage verifies gpu-usage prefers replicas with lower KV cache
-// utilization. Two backends are kept hot with sustained long requests under enable-kvcache;
-// probe traffic should land on the idle replica.
+// utilization. Two backends are kept hot with sustained long streaming load under
+// enable-kvcache; probe traffic uses the same fast mock latency as other plugin tests.
 func TestSchedulerPluginGPUCacheUsage(t *testing.T) {
 	ctx := context.Background()
 	applyPluginMockKVCacheProfile(t, testCtx.KubeClient, testNamespace)
