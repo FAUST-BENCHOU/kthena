@@ -373,27 +373,23 @@ func SendChatRequestWithURL(t *testing.T, url string, modelName string, messages
 	return resp
 }
 
-// SendChatRequestWithDataPlaneWait polls until the router data plane can route the model.
-// It retries when the HTTP response is 404 (route not yet programmed) or 503 (backend not ready).
-// Any other status — including 200 OK — is returned to the caller immediately without retry.
-// Used as a one-shot warm-up before rate-limit counting loops so transient routing gaps
-// do not consume quota tokens.
-func SendChatRequestWithDataPlaneWait(t *testing.T, modelName string, messages []ChatMessage) *http.Response {
+// SendChatRequestUntilRouterProgrammed retries the request until the route is programmed (not 404).
+// Used as a one-shot warm-up before rate-limit loops so routing gaps don't consume quota.
+func SendChatRequestUntilRouterProgrammed(t *testing.T, modelName string, messages []ChatMessage) *http.Response {
 	var finalResp *http.Response
 	ctx := context.Background()
 
 	err := wait.PollUntilContextTimeout(ctx, 1*time.Second, 60*time.Second, true, func(ctx context.Context) (bool, error) {
 		resp := SendChatRequest(t, modelName, messages)
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusServiceUnavailable {
-			t.Logf("Data plane not ready (status %d), retrying...", resp.StatusCode)
+		if resp.StatusCode == http.StatusNotFound {
+			t.Logf("Route not yet programmed (404), retrying...")
 			resp.Body.Close()
 			return false, nil
 		}
-		// If it's 200 OK, 429 Too Many Requests, or anything else, we return it to the test
 		finalResp = resp
 		return true, nil
 	})
 
-	require.NoError(t, err, "Data plane never became ready for the initial request")
+	require.NoError(t, err, "Router never programmed the route for model %q", modelName)
 	return finalResp
 }

@@ -69,45 +69,6 @@ type pdDisaggregationFixtures struct {
 	modelRoute   string
 }
 
-func getCounterValue(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) float64 {
-	mf, ok := metrics[metricName]
-	if !ok {
-		return 0
-	}
-	for _, m := range mf.GetMetric() {
-		if matchLabels(m.GetLabel(), labels) {
-			return m.GetCounter().GetValue()
-		}
-	}
-	return 0
-}
-
-func getHistogramCount(metrics map[string]*dto.MetricFamily, metricName string, labels map[string]string) uint64 {
-	mf, ok := metrics[metricName]
-	if !ok {
-		return 0
-	}
-	for _, m := range mf.GetMetric() {
-		if matchLabels(m.GetLabel(), labels) {
-			return m.GetHistogram().GetSampleCount()
-		}
-	}
-	return 0
-}
-
-func matchLabels(metricLabels []*dto.LabelPair, wantLabels map[string]string) bool {
-	labelMap := make(map[string]string)
-	for _, lp := range metricLabels {
-		labelMap[lp.GetName()] = lp.GetValue()
-	}
-	for k, v := range wantLabels {
-		if labelMap[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
 // WaitForKthenaRouterValidatingWebhook polls until a DryRun ModelRoute create reaches the
 // validating webhook (avoids flaky tests while cert-manager / deployment finishes).
 func WaitForKthenaRouterValidatingWebhook(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, namespace string) {
@@ -756,9 +717,9 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 
 		quotaRequests := inputTokenLimit / tokensPerRequest
 
-		// Warm up: absorb Envoy data-plane eventual consistency (404/503)
+		// Warm up: absorb routing eventual consistency (404)
 		// before the quota-counting loop begins. This request consumes one quota token.
-		warmUpResp := utils.SendChatRequestWithDataPlaneWait(t, createdModelRoute.Spec.ModelName, standardMessage)
+		warmUpResp := utils.SendChatRequestUntilRouterProgrammed(t, createdModelRoute.Spec.ModelName, standardMessage)
 		warmUpBody, warmUpErr := io.ReadAll(warmUpResp.Body)
 		warmUpResp.Body.Close()
 		require.NoError(t, warmUpErr, "Failed to read warm-up response body")
@@ -818,8 +779,8 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 
 		quotaRequests := inputTokenLimit / tokensPerRequest
 
-		// Warm up: absorb Envoy data-plane eventual consistency (404/503).
-		warmUpResp := utils.SendChatRequestWithDataPlaneWait(t, createdModelRoute.Spec.ModelName, standardMessage)
+		// Warm up: absorb routing eventual consistency (404).
+		warmUpResp := utils.SendChatRequestUntilRouterProgrammed(t, createdModelRoute.Spec.ModelName, standardMessage)
 		warmUpResp.Body.Close()
 		require.Equal(t, http.StatusOK, warmUpResp.StatusCode, "Warm-up request should succeed")
 
@@ -895,8 +856,8 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 
 		quotaRequests := inputTokenLimit / tokensPerRequest
 
-		// Warm up: absorb Envoy data-plane eventual consistency (404/503).
-		warmUpResp := utils.SendChatRequestWithDataPlaneWait(t, createdModelRoute.Spec.ModelName, standardMessage)
+		// Warm up: absorb routing eventual consistency (404).
+		warmUpResp := utils.SendChatRequestUntilRouterProgrammed(t, createdModelRoute.Spec.ModelName, standardMessage)
 		warmUpResp.Body.Close()
 		require.Equal(t, http.StatusOK, warmUpResp.StatusCode, "Warm-up request should succeed")
 
@@ -1074,8 +1035,8 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		// Warm up: absorb Envoy data-plane eventual consistency (404/503).
-		warmUpResp := utils.SendChatRequestWithDataPlaneWait(t, createdModelRoute.Spec.ModelName, standardMessage)
+		// Warm up: absorb routing eventual consistency (404).
+		warmUpResp := utils.SendChatRequestUntilRouterProgrammed(t, createdModelRoute.Spec.ModelName, standardMessage)
 		warmUpResp.Body.Close()
 		require.Equal(t, http.StatusOK, warmUpResp.StatusCode, "Warm-up request should succeed")
 
@@ -1163,8 +1124,8 @@ func TestModelRouteWithGlobalRateLimitShared(t *testing.T, testCtx *routercontex
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		// Warm up: absorb Envoy data-plane eventual consistency (404/503).
-		warmUpResp := utils.SendChatRequestWithDataPlaneWait(t, createdModelRoute.Spec.ModelName, standardMessage)
+		// Warm up: absorb routing eventual consistency (404).
+		warmUpResp := utils.SendChatRequestUntilRouterProgrammed(t, createdModelRoute.Spec.ModelName, standardMessage)
 		warmUpResp.Body.Close()
 		require.Equal(t, http.StatusOK, warmUpResp.StatusCode, "Warm-up request should succeed without Redis")
 
@@ -1760,7 +1721,7 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 		}
 
 		// Rollout-restart router so the deployment replaces pods gracefully with the restored config.
-		if err := utils.RolloutRestartDeploymentE(cleanupCtx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName); err != nil {
+		if err := utils.RolloutRestartDeployment(cleanupCtx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, defaultScalingTimeout); err != nil {
 			t.Logf("warning: cleanup failed to restart router: %v", err)
 		}
 
@@ -1818,7 +1779,8 @@ func TestRouterConfigUpdateShared(t *testing.T, testCtx *routercontext.RouterTes
 	}
 
 	t.Log("Triggering rollout restart for router deployment...")
-	utils.RolloutRestartDeployment(t, ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName)
+	err = utils.RolloutRestartDeployment(ctx, testCtx.KubeClient, kthenaNamespace, routerDeploymentName, defaultScalingTimeout)
+	require.NoError(t, err, "Failed to rollout restart router deployment")
 
 	// Wait for pre-restart pods to be replaced by new ones.
 	require.Eventually(t, func() bool {

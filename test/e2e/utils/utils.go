@@ -32,9 +32,8 @@ import (
 )
 
 const (
-	defaultPollingInterval     = 2 * time.Second
-	DefaultAPICallTimeout      = 10 * time.Second
-	rolloutRestartAtAnnotation = "kubectl.kubernetes.io/restartedAt"
+	defaultPollingInterval = 2 * time.Second
+	DefaultAPICallTimeout  = 10 * time.Second
 )
 
 // WaitForModelServingReady waits for a ModelServing to converge with desired replicas.
@@ -139,26 +138,6 @@ func WaitForDeploymentReadyE(ctx context.Context, kubeClient kubernetes.Interfac
 		return fmt.Errorf("deployment %q did not become ready within %v: %w", name, timeout, err)
 	}
 	return nil
-}
-
-// RolloutRestartDeployment triggers a rolling restart via the kubectl restartedAt annotation.
-func RolloutRestartDeployment(t *testing.T, ctx context.Context, kubeClient kubernetes.Interface, namespace, name string) {
-	t.Helper()
-	require.NoError(t, RolloutRestartDeploymentE(ctx, kubeClient, namespace, name))
-}
-
-// RolloutRestartDeploymentE is like RolloutRestartDeployment but returns an error (for cleanup paths).
-func RolloutRestartDeploymentE(ctx context.Context, kubeClient kubernetes.Interface, namespace, name string) error {
-	deploy, err := kubeClient.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	if deploy.Spec.Template.Annotations == nil {
-		deploy.Spec.Template.Annotations = make(map[string]string)
-	}
-	deploy.Spec.Template.Annotations[rolloutRestartAtAnnotation] = time.Now().UTC().Format(time.RFC3339)
-	_, err = kubeClient.AppsV1().Deployments(namespace).Update(ctx, deploy, metav1.UpdateOptions{})
-	return err
 }
 
 // CreateTestNamespace creates a test namespace and tolerates if it already exists.
