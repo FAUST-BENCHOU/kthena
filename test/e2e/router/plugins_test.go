@@ -151,14 +151,11 @@ func TestSchedulerPluginGPUCacheUsage(t *testing.T) {
 }
 
 // TestSchedulerPluginKVCacheAware verifies the full kvcache-aware chain:
-// sim (native ZMQ) -> zmq-bridge -> runtime -> Redis -> router plugin -> routing.
+// sim completions -> native ZMQ -> zmq-bridge -> runtime -> Redis -> router plugin -> routing.
 func TestSchedulerPluginKVCacheAware(t *testing.T) {
 	ctx := context.Background()
 	redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
 	t.Cleanup(redisCleanup)
-
-	redisHost := fmt.Sprintf("redis-server.%s.svc.cluster.local", kthenaNamespace)
-	patchMockRedisHost(t, testCtx.KubeClient, testNamespace, redisHost)
 
 	chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(
 		t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace,
@@ -167,15 +164,19 @@ func TestSchedulerPluginKVCacheAware(t *testing.T) {
 
 	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins.yaml")
 	model := route.Spec.ModelName
-	// Long enough for sim dummy tokenizer to produce multiple 8-token blocks and publish ZMQ events.
-	prompt := "kthena-router-plugin-e2e-fixed-prompt-kvcache-aware " + strings.Repeat("cache-block-token ", 16)
+	// Must fit sim kv-cache-size=8 blocks (block-size=8): prompt blocks + max_tokens blocks <= 8.
+	prompt := "kthena-kvcache-e2e " + strings.Repeat("cache-block-token ", 8)
 
 	pods := listReadyMockPods(t, testCtx.KubeClient, testNamespace)
 	require.Len(t, pods, pluginMockReplicaCount, "kvcache-aware test needs %d mock pods", pluginMockReplicaCount)
 	warmedPod := pods[0]
 
-	// Warm one pod only: sim publishes ZMQ via bridge, runtime writes Redis.
-	utils.DirectChatToPod(t, warmedPod, model, prompt, kvCacheWarmupRequests)
+	t.Logf("kvcache-aware: warming pod %s with %d direct chat requests (max_tokens=%d)",
+		warmedPod.Name, kvCacheWarmupRequests, kvCacheE2EMaxTokens)
+
+	// Warm one pod only: chat requests populate KV cache, runtime writes Redis.
+	utils.DirectChatToPod(t, warmedPod, model, prompt, kvCacheWarmupRequests, kvCacheE2EMaxTokens)
+	logMockPodContainerTail(t, testCtx.KubeClient, warmedPod, "zmq-bridge", 20)
 	waitForKVCachePodInRedis(t, testCtx.KubeClient, kthenaNamespace, warmedPod, model)
 
 	since := metav1.NewTime(time.Now())
@@ -225,7 +226,7 @@ func TestSchedulerPluginLeastLatency(t *testing.T) {
 	// Prime slow pool only: fast pods already have TTFT/TPOT from earlier plugin tests; an
 	// unprimed slow pod reports TTFT=0 and would incorrectly win least-latency scoring.
 	const slowPrimeRequests = 8
-	utils.DirectChatToPod(t, slowPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-slow-prime", slowPrimeRequests)
+	utils.DirectChatToPod(t, slowPods[0], model, "kthena-router-plugin-e2e-fixed-prompt-latency-slow-prime", slowPrimeRequests, 32)
 	time.Sleep(2 * time.Second) // allow router to scrape updated slow-pool metrics
 
 	since := metav1.NewTime(time.Now())

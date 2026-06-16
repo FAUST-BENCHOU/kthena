@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 
+import msgpack
 import zmq
 
 logging.basicConfig(level=logging.INFO)
@@ -68,6 +69,22 @@ def main() -> int:
             continue
 
         payload = parts[2]
+
+        # Best-effort introspection: help debug whether sim payload contains token ids.
+        if forwarded == 0:
+            try:
+                obj = msgpack.unpackb(payload, raw=False)
+                token_ids_present = False
+                if isinstance(obj, dict):
+                    events = obj.get("events")
+                    if isinstance(events, list) and events:
+                        first = events[0]
+                        if isinstance(first, dict) and "token_ids" in first:
+                            token_ids_present = True
+                logger.info("first payload decoded type=%s token_ids_present=%s", type(obj).__name__, token_ids_present)
+            except Exception as exc:
+                logger.info("first payload msgpack decode failed: %s", exc)
+
         pub.send_multipart([RUNTIME_TOPIC.encode("utf-8"), b"", payload])
         forwarded += 1
         if forwarded == 1 or forwarded % 10 == 0:
@@ -81,3 +98,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

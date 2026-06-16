@@ -37,34 +37,41 @@ const (
 	ModelServerName        = DeploymentName
 	ModelName              = "router-plugin-model"
 	TestDataDir            = "test/e2e/router/router-plugins/testdata"
-	ScriptsDir             = "test/e2e/router/router-plugins/scripts"
 	SlowMockDeploymentName = "router-plugin-mock-slow"
 	SlowMockAppLabel       = "router-plugin-mock-slow"
 
-	BridgeConfigName  = "router-plugin-mock-bridge"
-	zmqBridgeFileName = "zmq-bridge.py"
+	BridgeConfigName     = "router-plugin-mock-bridge"
+	RuntimeEnvConfigName = "router-plugin-mock-runtime-env"
 )
 
 // SetupPluginComponents deploys fast/slow plugin mocks and ModelServers shared by plugin e2e tests.
-func SetupPluginComponents(kubeClient *kubernetes.Clientset, kthenaClient *clientset.Clientset, namespace string) error {
+func SetupPluginComponents(kubeClient *kubernetes.Clientset, kthenaClient *clientset.Clientset, namespace, kthenaNamespace string) error {
 	ctx := stdcontext.Background()
 
-	bridgeScript, err := utils.ReadFileFromProjectRoot(filepath.Join(ScriptsDir, zmqBridgeFileName))
-	if err != nil {
-		return fmt.Errorf("read %s: %w", zmqBridgeFileName, err)
-	}
-
-	configMap := &corev1.ConfigMap{
+	bridgeConfigMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      BridgeConfigName,
 			Namespace: namespace,
 		},
 		Data: map[string]string{
-			"zmq-bridge.py": string(bridgeScript),
+			"zmq-bridge.py": utils.ZMQBridgePy,
 		},
 	}
-	if _, err := kubeClient.CoreV1().ConfigMaps(namespace).Create(ctx, configMap, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+	if _, err := kubeClient.CoreV1().ConfigMaps(namespace).Create(ctx, bridgeConfigMap, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create zmq-bridge configmap: %w", err)
+	}
+
+	runtimeEnvConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      RuntimeEnvConfigName,
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			"REDIS_HOST": fmt.Sprintf("redis-server.%s.svc.cluster.local", kthenaNamespace),
+		},
+	}
+	if _, err := kubeClient.CoreV1().ConfigMaps(namespace).Create(ctx, runtimeEnvConfigMap, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create runtime env configmap: %w", err)
 	}
 
 	deployment := utils.LoadYAMLFromFile[appsv1.Deployment](filepath.Join(TestDataDir, "LLM-Mock-plugins.yaml"))

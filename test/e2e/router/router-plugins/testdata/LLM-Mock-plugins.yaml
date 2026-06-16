@@ -100,7 +100,10 @@ spec:
             - name: VLLM_ZMQ_ENDPOINT
               value: "tcp://127.0.0.1:5557"
             - name: REDIS_HOST
-              value: "redis-server-placeholder"
+              valueFrom:
+                configMapKeyRef:
+                  name: router-plugin-mock-runtime-env
+                  key: REDIS_HOST
             - name: REDIS_PORT
               value: "6379"
           ports:
