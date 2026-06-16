@@ -373,8 +373,8 @@ func SendChatRequestWithURL(t *testing.T, url string, modelName string, messages
 	return resp
 }
 
-// SendChatRequestUntilRouterProgrammed retries the request until the route is programmed (not 404).
-// Used as a one-shot warm-up before rate-limit loops so routing gaps don't consume quota.
+// SendChatRequestUntilRouterProgrammed polls until the Kthena Router has programmed the route (stops returning 404).
+// We don't retry on 503 because it only occurs when the client disconnects before receiving a response.
 func SendChatRequestUntilRouterProgrammed(t *testing.T, modelName string, messages []ChatMessage) *http.Response {
 	var finalResp *http.Response
 	ctx := context.Background()

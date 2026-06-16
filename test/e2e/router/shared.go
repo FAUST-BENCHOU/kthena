@@ -605,6 +605,11 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 				strings.Contains(resp.Body, "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
 		}, 1*time.Minute, 2*time.Second, "ModelRoute update should propagate and requests should route successfully")
 
+		// The above 200 OK does not guarantee Envoy has fully converged on the new 50:30 weights,
+		// because the old 70:30 weights also returned 200 OK. Wait an additional 5 seconds
+		// for the Envoy cluster weight update to propagate so we don't skew our distribution sample.
+		time.Sleep(5 * time.Second)
+
 		const (
 			totalRequests = 500
 			maxRetries    = 5
@@ -616,7 +621,10 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		distributionOK := false
 
 		for attempt := 0; attempt < maxRetries; attempt++ {
-			sinceTime := metav1.NewTime(time.Now().Add(-2 * time.Second))
+			// Ensure we only look at logs from requests we are about to make.
+			// time.Now() is safer than time.Now().Add(-2s) because it avoids
+			// including logs from previous attempts.
+			sinceTime := metav1.Now()
 			for i := 0; i < totalRequests; i++ {
 				resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
 				assert.Equal(t, 200, resp.StatusCode)
