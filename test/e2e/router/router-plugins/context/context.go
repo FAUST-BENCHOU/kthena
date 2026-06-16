@@ -19,6 +19,7 @@ package context
 import (
 	stdcontext "context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -38,11 +40,31 @@ const (
 	TestDataDir            = "test/e2e/router/router-plugins/testdata"
 	SlowMockDeploymentName = "router-plugin-mock-slow"
 	SlowMockAppLabel       = "router-plugin-mock-slow"
+
+	BridgeConfigName = "router-plugin-mock-bridge"
 )
 
 // SetupPluginComponents deploys fast/slow plugin mocks and ModelServers shared by plugin e2e tests.
 func SetupPluginComponents(kubeClient *kubernetes.Clientset, kthenaClient *clientset.Clientset, namespace string) error {
 	ctx := stdcontext.Background()
+
+	bridgeScript, err := os.ReadFile(filepath.Join(TestDataDir, "zmq-bridge.py"))
+	if err != nil {
+		return fmt.Errorf("read zmq-bridge.py: %w", err)
+	}
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      BridgeConfigName,
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			"zmq-bridge.py": string(bridgeScript),
+		},
+	}
+	if _, err := kubeClient.CoreV1().ConfigMaps(namespace).Create(ctx, configMap, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create zmq-bridge configmap: %w", err)
+	}
 
 	deployment := utils.LoadYAMLFromFile[appsv1.Deployment](filepath.Join(TestDataDir, "LLM-Mock-plugins.yaml"))
 	deployment.Namespace = namespace

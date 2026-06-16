@@ -17,12 +17,14 @@ limitations under the License.
 package router
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/vllm"
@@ -30,6 +32,7 @@ import (
 	plugincontext "github.com/volcano-sh/kthena/test/e2e/router/router-plugins/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -42,6 +45,11 @@ const (
 	gpuCacheUsageLoadWaitTimeout   = 90 * time.Second
 	gpuCacheUsageLoadConcurrency   = 2
 	gpuCacheUsageLoadMaxTokens     = 256
+
+	kvCacheRedisWaitTimeout       = 90 * time.Second
+	kvCacheWarmupRequests         = 30
+	redisServerAppLabel           = "app.kubernetes.io/component=redis-server"
+	kvCacheMatrixKeyPrefix        = "matrix:kv:block:"
 )
 
 func listReadyMockPods(t *testing.T, kube kubernetes.Interface, namespace string) []corev1.Pod {
@@ -284,4 +292,96 @@ const (
       enabled:
         - name: gpu-usage
           weight: 1`
+
+	schedulerOnlyKVCacheAware = `scheduler:
+  pluginConfig:
+  - name: kvcache-aware
+    args:
+      blockSizeToHash: 8
+      maxBlocksToMatch: 128
+  plugins:
+    Filter:
+      enabled: []
+    Score:
+      enabled:
+        - name: kvcache-aware
+          weight: 1`
 )
+
+func setupRedisClient(t *testing.T, kube kubernetes.Interface, namespace string) (*redis.Client, func()) {
+	t.Helper()
+	pods := utils.ListReadyPodsByLabel(t, kube, namespace, redisServerAppLabel)
+	require.NotEmpty(t, pods, "no ready redis pods in namespace %s", namespace)
+
+	localPort := utils.AllocateLocalPort(t)
+	pf, err := utils.SetupPortForwardToPod(namespace, pods[0].Name, localPort, "6379")
+	require.NoError(t, err, "port-forward to redis pod %s", pods[0].Name)
+
+	addr := fmt.Sprintf("127.0.0.1:%s", localPort)
+	client := redis.NewClient(&redis.Options{Addr: addr})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Ping(ctx).Err(), "redis ping via port-forward")
+
+	return client, func() {
+		_ = client.Close()
+		pf.Close()
+	}
+}
+
+func patchMockRedisHost(t *testing.T, kube kubernetes.Interface, namespace, redisHost string) {
+	t.Helper()
+	ctx := context.Background()
+	deploy, err := kube.AppsV1().Deployments(namespace).Get(ctx, plugincontext.DeploymentName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	for i := range deploy.Spec.Template.Spec.Containers {
+		if deploy.Spec.Template.Spec.Containers[i].Name != "runtime" {
+			continue
+		}
+		for j := range deploy.Spec.Template.Spec.Containers[i].Env {
+			if deploy.Spec.Template.Spec.Containers[i].Env[j].Name != "REDIS_HOST" {
+				continue
+			}
+			deploy.Spec.Template.Spec.Containers[i].Env[j].Value = redisHost
+			_, err = kube.AppsV1().Deployments(namespace).Update(ctx, deploy, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			require.NoError(t, utils.WaitForDeploymentReadyE(ctx, kube, namespace, plugincontext.DeploymentName, 5*time.Minute))
+			return
+		}
+	}
+	t.Fatal("runtime container missing REDIS_HOST env")
+}
+
+func waitForKVCachePodInRedis(t *testing.T, kube kubernetes.Interface, redisNamespace string, pod corev1.Pod, modelName string) {
+	t.Helper()
+	podIdentifier := fmt.Sprintf("%s.%s", pod.Name, pod.Namespace)
+	keyPattern := fmt.Sprintf("%s%s@*", kvCacheMatrixKeyPrefix, modelName)
+
+	require.Eventually(t, func() bool {
+		client, closeRedis := setupRedisClient(t, kube, redisNamespace)
+		defer closeRedis()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		keys, err := client.Keys(ctx, keyPattern).Result()
+		if err != nil || len(keys) == 0 {
+			return false
+		}
+		for _, key := range keys {
+			fields, err := client.HKeys(ctx, key).Result()
+			if err != nil {
+				continue
+			}
+			for _, field := range fields {
+				if field == podIdentifier {
+					t.Logf("kvcache-aware redis ready: key=%s pod=%s", key, podIdentifier)
+					return true
+				}
+			}
+		}
+		return false
+	}, kvCacheRedisWaitTimeout, 2*time.Second,
+		"redis should contain kv block mappings for pod %s model %q", podIdentifier, modelName)
+}
