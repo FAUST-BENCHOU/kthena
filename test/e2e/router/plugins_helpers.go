@@ -46,10 +46,10 @@ const (
 	gpuCacheUsageLoadConcurrency   = 2
 	gpuCacheUsageLoadMaxTokens     = 256
 
-	kvCacheRedisWaitTimeout       = 90 * time.Second
-	kvCacheWarmupRequests         = 30
-	redisServerAppLabel           = "app.kubernetes.io/component=redis-server"
-	kvCacheMatrixKeyPrefix        = "matrix:kv:block:"
+	kvCacheRedisWaitTimeout = 90 * time.Second
+	kvCacheWarmupRequests   = 30
+	redisServerAppLabel     = "app.kubernetes.io/component=redis-server"
+	kvCacheMatrixKeyPrefix  = "matrix:kv:block:"
 )
 
 func listReadyMockPods(t *testing.T, kube kubernetes.Interface, namespace string) []corev1.Pod {
