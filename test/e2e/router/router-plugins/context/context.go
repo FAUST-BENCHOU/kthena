@@ -19,7 +19,6 @@ package context
 import (
 	stdcontext "context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -38,19 +37,21 @@ const (
 	ModelServerName        = DeploymentName
 	ModelName              = "router-plugin-model"
 	TestDataDir            = "test/e2e/router/router-plugins/testdata"
+	ScriptsDir             = "test/e2e/router/router-plugins/scripts"
 	SlowMockDeploymentName = "router-plugin-mock-slow"
 	SlowMockAppLabel       = "router-plugin-mock-slow"
 
-	BridgeConfigName = "router-plugin-mock-bridge"
+	BridgeConfigName  = "router-plugin-mock-bridge"
+	zmqBridgeFileName = "zmq-bridge.py"
 )
 
 // SetupPluginComponents deploys fast/slow plugin mocks and ModelServers shared by plugin e2e tests.
 func SetupPluginComponents(kubeClient *kubernetes.Clientset, kthenaClient *clientset.Clientset, namespace string) error {
 	ctx := stdcontext.Background()
 
-	bridgeScript, err := os.ReadFile(filepath.Join(TestDataDir, "zmq-bridge.py"))
+	bridgeScript, err := utils.ReadFileFromProjectRoot(filepath.Join(ScriptsDir, zmqBridgeFileName))
 	if err != nil {
-		return fmt.Errorf("read zmq-bridge.py: %w", err)
+		return fmt.Errorf("read %s: %w", zmqBridgeFileName, err)
 	}
 
 	configMap := &corev1.ConfigMap{

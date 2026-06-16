@@ -1,6 +1,6 @@
 # Mock vLLM backends for router scheduler plugin e2e tests.
 # Includes sim native ZMQ + zmq-bridge + runtime for kvcache-aware full-chain tests.
-# ConfigMap router-plugin-mock-bridge is created by SetupPluginComponents.
+# ConfigMap router-plugin-mock-bridge (from scripts/zmq-bridge.py) is created by SetupPluginComponents.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

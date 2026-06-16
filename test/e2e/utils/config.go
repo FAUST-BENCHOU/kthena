@@ -85,6 +85,14 @@ func LoadYAMLFromFile[T any](path string) *T {
 	return &obj
 }
 
+// ReadFileFromProjectRoot reads a file from a path relative to the repository root.
+func ReadFileFromProjectRoot(path string) ([]byte, error) {
+	_, filename, _, _ := runtime.Caller(0)
+	projectRoot := filepath.Join(filepath.Dir(filename), "..", "..", "..")
+	absPath := filepath.Join(projectRoot, path)
+	return os.ReadFile(absPath)
+}
+
 // LoadMultiResourceYAMLFromFile loads a multi-resource YAML file from a path relative to the project root
 // and returns all resources as a slice of the specified type.
 // The YAML file can contain multiple resources separated by "---".
