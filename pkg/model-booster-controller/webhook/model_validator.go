@@ -231,6 +231,13 @@ func validateAutoScalingPolicyScope(model *registryv1alpha1.ModelBooster) field.
 			))
 		}
 	} else {
+		if len(spec.AutoscalingPolicy.Metrics) == 0 {
+			allErrs = append(allErrs, field.Required(
+				field.NewPath("spec").Child("autoscalingPolicy").Child("metrics"),
+				"at least one metric must be set when model-level autoscaling is set",
+			))
+		}
+
 		if backend.MinReplicas < 0 {
 			allErrs = append(allErrs, field.Invalid(
 				field.NewPath("spec").Child("backend").Child("minReplicas"),
