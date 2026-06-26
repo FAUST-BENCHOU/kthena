@@ -9,10 +9,7 @@ import CodeBlock from '@theme/CodeBlock';
 Get up and running with Kthena in minutes! This guide will walk you through deploying your first AI model.
 We'll install a model from Hugging Face and perform inference using a simple curl command.
 
-We have two optional ways to quickly start using kthena to deploy LLM.
-
-1. ModelBooster
-2. ModelServing
+We have two optional ways to quickly start using kthena to deploy LLM. Highly recommend to experiment with `ModelServing`.
 
 ## Prerequisites
 
@@ -20,6 +17,69 @@ We have two optional ways to quickly start using kthena to deploy LLM.
 - Access to a Kubernetes cluster with `kubectl` configured
 - Pod in Kubernetes can access the internet
 - [volcano](https://volcano.sh/en/docs/installation/) is installed.
+
+## ModelServing
+
+You can flexibly configure your own self hosted LLM through `ModelServing`.
+
+Model Serving Controller is a component of Kthena that provides a flexible and customizable way to deploy LLMs. It allows you to configure your own LLM through `ModelServing` CRD. ModelServing supports deploying large language models (LLMs) based on roles, with support for gang scheduling and network topology scheduling. It also provides fundamental features such as scaling and rolling updates.
+
+Here is an [example](https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/model-serving/gpu-PD.yaml) of deploying the PD-disaggregation Qwen-8B Model on GPU Using `ModelServing`.
+
+**Step 1: Create a ModelServing Resource Object:**
+
+```sh
+kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/model-serving/gpu-pd-disaggregation.yaml
+```
+
+**Step 2: Wait for ModelServing to be Ready**
+
+After all Pods awaiting deployment have started running, you can run the following command to see the result:
+
+```sh
+kubectl get po
+
+NAMESPACE            NAME                                          READY   STATUS    RESTARTS   AGE
+default              PD-sample-0-decode-0-0                        1/1     Running   0          2m
+default              PD-sample-0-prefill-0-0                       1/1     Running   0          2m
+
+------------------------------------------
+
+kubectl get modelserving sample -o jsonpath='{.status.conditions}' | jq '.' 
+
+[
+  {
+    "lastTransitionTime": "2025-09-29T08:11:16Z",
+    "message": "Some groups is progressing: [0]",
+    "reason": "GroupProgressing",
+    "status": "False",
+    "type": "Progressing"
+  },
+  {
+    "lastTransitionTime": "2025-09-29T08:11:21Z",
+    "message": "All Serving groups are ready",
+    "reason": "AllGroupsReady",
+    "status": "True",
+    "type": "Available"
+  }
+]
+```
+
+**Step 3: Send Inference Request**
+
+Before you can chat with LLM, you need to create `ModelRoute` and `ModelServer`. You can refer to [modelRoute configuration](../user-guide/prefill-decode-disaggregation/vllm-ascend-mooncake.md#3-modelroute-configuration) and [modelServer configuration](../user-guide/prefill-decode-disaggregation/vllm-ascend-mooncake.md#2-modelserver-configuration).
+
+Then you can use the following command to send a request:
+
+```bash
+export MODEL="models/Qwen3-8B"
+
+curl http://$ROUTER_IP/v1/completions -H "Content-Type: application/json" -d "{
+        \"model\": \"$MODEL\",
+        \"prompt\": \"San Francisco is a\",
+        \"temperature\": 0
+}"
+```
 
 ## ModelBooster
 
@@ -95,66 +155,3 @@ kubectl get svc kthena-router -o jsonpath='{.spec.clusterIP}' -n <your-namespace
 
 This IP can only be used inside the cluster. If you want to chat from outside the cluster, you can use the `EXTERNAL-IP`
 of `kthena-router` after you bind it.
-
-## ModelServing
-
-In addition to using Kthena with a single click via modelBooster, you can also flexibly configure your own LLM through modelServing.
-
-Model Serving Controller is a component of Kthena that provides a flexible and customizable way to deploy LLMs. It allows you to configure your own LLM through `ModelServing` CRD. ModelServing supports deploying large language models (LLMs) based on roles, with support for gang scheduling and network topology scheduling. It also provides fundamental features such as scaling and rolling updates.
-
-Here is an [example](https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/model-serving/gpu-PD.yaml) of deploying the PD-disaggregation Qwen-8B Model on GPU Using `ModelServing`.
-
-**Step 1: Create a ModelServing Resource Object:**
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/model-serving/gpu-pd-disaggregation.yaml
-```
-
-**Step 2: Wait for ModelServing to be Ready**
-
-After all Pods awaiting deployment have started running, you can run the following command to see the result:
-
-```sh
-kubectl get po
-
-NAMESPACE            NAME                                          READY   STATUS    RESTARTS   AGE
-default              PD-sample-0-decode-0-0                        1/1     Running   0          2m
-default              PD-sample-0-prefill-0-0                       1/1     Running   0          2m
-
-------------------------------------------
-
-kubectl get modelserving sample -o jsonpath='{.status.conditions}' | jq '.' 
-
-[
-  {
-    "lastTransitionTime": "2025-09-29T08:11:16Z",
-    "message": "Some groups is progressing: [0]",
-    "reason": "GroupProgressing",
-    "status": "False",
-    "type": "Progressing"
-  },
-  {
-    "lastTransitionTime": "2025-09-29T08:11:21Z",
-    "message": "All Serving groups are ready",
-    "reason": "AllGroupsReady",
-    "status": "True",
-    "type": "Available"
-  }
-]
-```
-
-**Step 3: Perform Inference**
-
-Before you can perform inference, you need to create `ModelRoute` and `ModelServer`. You can refer to [modelRoute Configuration](../user-guide/prefill-decode-disaggregation/vllm-ascend-mooncake.md#3-modelroute-configuration) and [modelServer Configuration](../user-guide/prefill-decode-disaggregation/vllm-ascend-mooncake.md#2-modelserver-configuration).
-
-Then you can use the following command to send a request:
-
-```bash
-export MODEL="models/Qwen3-8B"
-
-curl http://$ROUTER_IP/v1/completions -H "Content-Type: application/json" -d "{
-        \"model\": \"$MODEL\",
-        \"prompt\": \"San Francisco is a\",
-        \"temperature\": 0
-}"
-```
