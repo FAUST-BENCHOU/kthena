@@ -9,7 +9,7 @@ import CodeBlock from '@theme/CodeBlock';
 Get up and running with Kthena in minutes! This guide will walk you through deploying your first AI model.
 We'll install a model from Hugging Face and perform inference using a simple curl command.
 
-We have two optional ways to quickly start using kthena to deploy LLM. Highly recommend to experiment with `ModelServing`.
+Kthena provides two ways to quickly deploy LLMs. We recommend starting with `ModelServing` for flexible, self-hosted deployments.
 
 ## Prerequisites
 
@@ -20,11 +20,11 @@ We have two optional ways to quickly start using kthena to deploy LLM. Highly re
 
 ## ModelServing
 
-You can flexibly configure your own self hosted LLM through `ModelServing`.
+You can flexibly configure your own self-hosted LLM through `ModelServing`.
 
 Model Serving Controller is a component of Kthena that provides a flexible and customizable way to deploy LLMs. It allows you to configure your own LLM through `ModelServing` CRD. ModelServing supports deploying large language models (LLMs) based on roles, with support for gang scheduling and network topology scheduling. It also provides fundamental features such as scaling and rolling updates.
 
-Here is an [example](https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/model-serving/gpu-PD.yaml) of deploying the PD-disaggregation Qwen-8B Model on GPU Using `ModelServing`.
+Here is an [example](https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/main/examples/model-serving/gpu-pd-disaggregation.yaml) of deploying the PD-disaggregation `Qwen/Qwen3-0.6B` model on GPU using `ModelServing`. For the complete walkthrough, including the matching `ModelServer` and `ModelRoute` resources, see [vLLM Prefill-Decode Disaggregation (GPU)](../user-guide/prefill-decode-disaggregation/vllm-pd-disaggregation.md).
 
 **Step 1: Create a ModelServing Resource Object:**
 
@@ -37,15 +37,15 @@ kubectl apply -f https://raw.githubusercontent.com/volcano-sh/kthena/refs/heads/
 After all Pods awaiting deployment have started running, you can run the following command to see the result:
 
 ```sh
-kubectl get po
+kubectl get pod -owide -l modelserving.volcano.sh/name=vllm-qwen-06b
 
-NAMESPACE            NAME                                          READY   STATUS    RESTARTS   AGE
-default              PD-sample-0-decode-0-0                        1/1     Running   0          2m
-default              PD-sample-0-prefill-0-0                       1/1     Running   0          2m
+NAME                              READY   STATUS    RESTARTS   AGE   IP         NODE     NOMINATED NODE   READINESS GATES
+vllm-qwen-06b-0-decode-0-0        1/1     Running   0          2m    <pod-ip>   <node>   <none>           <none>
+vllm-qwen-06b-0-prefill-0-0       1/1     Running   0          2m    <pod-ip>   <node>   <none>           <none>
 
 ------------------------------------------
 
-kubectl get modelserving sample -o jsonpath='{.status.conditions}' | jq '.' 
+kubectl get modelserving vllm-qwen-06b -o jsonpath='{.status.conditions}' | jq '.'
 
 [
   {
@@ -67,18 +67,17 @@ kubectl get modelserving sample -o jsonpath='{.status.conditions}' | jq '.'
 
 **Step 3: Send Inference Request**
 
-Before you can chat with LLM, you need to create `ModelRoute` and `ModelServer`. You can refer to [modelRoute configuration](../user-guide/prefill-decode-disaggregation/vllm-ascend-mooncake.md#3-modelroute-configuration) and [modelServer configuration](../user-guide/prefill-decode-disaggregation/vllm-ascend-mooncake.md#2-modelserver-configuration).
+Before you can chat with the LLM, create the matching `ModelServer` and `ModelRoute` resources. You can refer to the [ModelServer configuration](../user-guide/prefill-decode-disaggregation/vllm-pd-disaggregation.md#2-modelserver-configuration) and [ModelRoute configuration](../user-guide/prefill-decode-disaggregation/vllm-pd-disaggregation.md#3-modelroute-configuration) in the vLLM GPU PD guide.
 
 Then you can use the following command to send a request:
 
 ```bash
-export MODEL="models/Qwen3-8B"
+export MODEL="Qwen/Qwen3-0.6B"
+export ROUTER_IP=$(kubectl get svc kthena-router -n kthena-system -o jsonpath='{.spec.clusterIP}')
 
-curl http://$ROUTER_IP/v1/completions -H "Content-Type: application/json" -d "{
-        \"model\": \"$MODEL\",
-        \"prompt\": \"San Francisco is a\",
-        \"temperature\": 0
-}"
+curl -v http://$ROUTER_IP:80/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"'"$MODEL"'","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 ## ModelBooster
@@ -136,7 +135,7 @@ You can now perform inference using the model. Here's an example of how to send 
 curl -X POST http://<model-route-ip>/v1/chat/completions \
 -H "Content-Type: application/json" \
 -d '{
-  "model": "demo",
+  "model": "Qwen2.5-0.5B-Instruct",
   "messages": [
     {
       "role": "user",
