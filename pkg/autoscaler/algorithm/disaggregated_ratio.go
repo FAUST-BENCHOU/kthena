@@ -89,8 +89,8 @@ func EnforceRoleRatio(replicas map[string]int32, bounds map[string]ReplicaBounds
 		if raisedNumerator <= numeratorBounds.Max {
 			numerator = max(raisedNumerator, numeratorBounds.Min)
 		} else if minRatio > 0 {
-			// If raising numerator is impossible, reduce denominator to the largest
-			// value that satisfies the minimum ratio with the current numerator.
+			// If raising numerator is impossible, saturate it before reducing denominator so we keep as much capacity as possible.
+			numerator = numeratorBounds.Max
 			denominator = floorInt32(float64(numerator) / minRatio)
 			denominator = min(max(denominator, denominatorBounds.Min), denominatorBounds.Max)
 		}
@@ -105,8 +105,8 @@ func EnforceRoleRatio(replicas map[string]int32, bounds map[string]ReplicaBounds
 			if raisedDenominator <= denominatorBounds.Max {
 				denominator = max(raisedDenominator, denominatorBounds.Min)
 			} else {
-				// If denominator cannot be raised enough, lower numerator to the
-				// largest value allowed by the maximum ratio.
+				// If denominator cannot be raised enough, saturate it before lowering numerator so we keep as much capacity as possible.
+				denominator = denominatorBounds.Max
 				numerator = floorInt32(maxRatio * float64(denominator))
 				numerator = min(max(numerator, numeratorBounds.Min), numeratorBounds.Max)
 			}

@@ -526,9 +526,15 @@ func (ac *AutoscaleController) updateDisaggregatedPolicyStatus(ctx context.Conte
 
 	if result != nil {
 		roleStatuses := make([]workload.TargetScalingStatus, 0, len(result.Roles))
+		prevLastScaleTimeByRole := map[string]*metav1.Time{}
+		if policy.Status.DisaggregatedStatus != nil {
+			for _, prev := range policy.Status.DisaggregatedStatus.Roles {
+				prevLastScaleTimeByRole[prev.Name] = prev.LastScaleTime
+			}
+		}
 		now := metav1.Now()
 		for _, role := range result.Roles {
-			var lastScaleTime *metav1.Time
+			lastScaleTime := prevLastScaleTimeByRole[role.Name]
 			if reconcileErr == nil && role.CurrentReplicas != role.FinalReplicas {
 				lastScaleTime = &now
 			}

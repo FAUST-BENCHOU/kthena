@@ -271,9 +271,11 @@ func (v *AutoscalingPolicyValidator) validateDisaggregatedTarget(policy *registr
 				effectiveMetricNames[metric.Name] = struct{}{}
 			}
 		}
-		for sourceKey := range roleParam.MetricSources {
-			if _, exists := effectiveMetricNames[sourceKey]; !exists {
-				allErrs = append(allErrs, field.Invalid(rolePath.Child("metricSources").Key(sourceKey), sourceKey, "metricSources key must match an effective metric name"))
+		if !fixedRole {
+			for sourceKey := range roleParam.MetricSources {
+				if _, exists := effectiveMetricNames[sourceKey]; !exists {
+					allErrs = append(allErrs, field.Invalid(rolePath.Child("metricSources").Key(sourceKey), sourceKey, "metricSources key must match an effective metric name"))
+				}
 			}
 		}
 	}
@@ -303,6 +305,8 @@ func (v *AutoscalingPolicyValidator) validateDisaggregatedTarget(policy *registr
 			maxRatio := constraint.MaxRatio.AsFloat64Slow()
 			if math.IsNaN(minRatio) || math.IsNaN(maxRatio) || math.IsInf(minRatio, 0) || math.IsInf(maxRatio, 0) {
 				allErrs = append(allErrs, field.Invalid(ratioPath, "ratio", "ratio values must be finite"))
+			} else if minRatio < 0 || maxRatio <= 0 {
+				allErrs = append(allErrs, field.Invalid(ratioPath, "ratio", "minRatio must be >= 0 and maxRatio must be > 0"))
 			} else {
 				if denominatorParam.MaxReplicas > 0 && float64(numeratorParam.MinReplicas)/float64(denominatorParam.MaxReplicas) > maxRatio {
 					allErrs = append(allErrs, field.Invalid(ratioPath, "bounds", "ratioConstraint is not achievable within role replica bounds"))

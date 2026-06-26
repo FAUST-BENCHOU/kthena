@@ -73,14 +73,14 @@ func TestEnforceRoleRatio(t *testing.T) {
 			wantRatio:    "1",
 		},
 		{
-			name:     "fallback lowers denominator when numerator max is insufficient",
+			name:     "fallback saturates numerator before lowering denominator",
 			replicas: map[string]int32{"prefill": 2, "decode": 20},
 			bounds: map[string]ReplicaBounds{
 				"prefill": {Min: 0, Max: 3},
 				"decode":  {Min: 0, Max: 20},
 			},
 			constraint:   constraint,
-			wantReplicas: map[string]int32{"prefill": 2, "decode": 8},
+			wantReplicas: map[string]int32{"prefill": 3, "decode": 12},
 			wantAdjusted: true,
 			wantRatio:    "0.25",
 		},
