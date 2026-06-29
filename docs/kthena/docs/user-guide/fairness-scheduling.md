@@ -1,25 +1,14 @@
 # Fairness Scheduling
 
-Kthena Router fairness scheduling prevents a single user from dominating a model's serving capacity during periods of contention. Instead of serving requests strictly in arrival order, the router prioritizes users with lower recent usage.
+Kthena Router fairness scheduling prevents a single user from dominating a model's serving capacity during periods of contention. Instead of serving requests strictly in arrival order, the router maintains a per-model fairness queue and prioritizes users with lower recent usage.
 
-Fairness scheduling is the **default priority strategy** of the router's per-model **priority queue**. This guide explains how the priority queue works, how the user-fairness strategy orders requests, how to enable it, which configuration knobs are available, and how to verify that it is behaving as expected.
+This guide explains how fairness scheduling works, how to enable it, which configuration knobs are available, and how to verify that it is behaving as expected.
 
-## The Priority Queue and Its Strategies
-
-The router schedules requests through a per-model **priority queue**. The queue itself is strategy-agnostic: it orders queued requests by a numeric priority value and admits them to the backends subject to capacity. Everything else the queue provides — admission control, request timeouts, client-disconnect handling, dequeue-time priority refresh, and heap rebuild — is shared regardless of how priority is computed.
-
-How the priority value is computed is decided by a pluggable **priority strategy**:
-
-- **User Fairness** (default, this guide): priority is derived from each user's recent token usage, so users with lower recent usage are served first.
-- **Session Boost** (alternative, see [Session Boost Queue](./session-boost)): priority is derived from recent session completions, so follow-up requests in a recently active conversation are promoted to maximize prefix cache reuse.
-
-The two strategies are **mutually exclusive**. Enabling the priority queue (`ENABLE_PRIORITY_QUEUE=true`) activates the default user-fairness strategy described here. Setting `ENABLE_SESSION_BOOST=true` switches the same queue to the session-boost strategy instead.
-
-Because both strategies share the same queue, the queue-level knobs documented below (prefixed `PRIORITY_QUEUE_*`) apply to either strategy, while the `FAIRNESS_*` knobs are specific to the user-fairness strategy.
+Fairness scheduling and [Session Boost](./session-boost) are **mutually exclusive** scheduling strategies. Enable user fairness with `ENABLE_FAIRNESS_SCHEDULING=true`, or session boost with `ENABLE_SESSION_BOOST=true`, but not both. Enabling both is a configuration error.
 
 ## Overview
 
-When the priority queue runs with the default user-fairness strategy, the router does the following for each request:
+When fairness scheduling is enabled, the router does the following for each request:
 
 1. Extracts the user identity for the request.
 2. Calculates a priority from the user's recent usage for that model.
@@ -63,15 +52,15 @@ In practice this means:
 
 The priority queue currently supports two dequeue modes:
 
-- **QPS mode**: when `PRIORITY_QUEUE_MAX_CONCURRENT=0`, the queue releases requests at a fixed maximum dequeue rate controlled by `PRIORITY_QUEUE_MAX_QPS`.
-- **Concurrency-gated mode**: when `PRIORITY_QUEUE_MAX_CONCURRENT>0`, the queue allows only that many in-flight requests through the gate for a model at a time.
+- **QPS mode**: when `FAIRNESS_MAX_CONCURRENT=0`, the queue releases requests at a fixed maximum dequeue rate controlled by `FAIRNESS_MAX_QPS`.
+- **Concurrency-gated mode**: when `FAIRNESS_MAX_CONCURRENT>0`, the queue allows only that many in-flight requests through the gate for a model at a time.
 
 The queue also supports the following runtime protections:
 
 - **Request-scoped timeout**: requests waiting too long in the queue time out.
 - **Client disconnect handling**: cancelled requests are skipped instead of being sent downstream later.
-- **Dequeue-time priority refresh**: when `PRIORITY_QUEUE_REFRESH_RETRIES > 0`, the priority of the candidate request (the heap root) is recalculated against current usage before it is released. If a fresher priority would put it behind another waiting request, it is reinserted and the next candidate is tried instead.
-- **Heap rebuild fallback**: when dequeue-time refresh retries are exhausted *and* the current queue depth is at or below `PRIORITY_QUEUE_REBUILD_THRESHOLD`, all queued item priorities are recalculated from current usage and the heap is fully rebuilt. This bounds the staleness of the entire queue while protecting against expensive rebuilds on large queues.
+- **Dequeue-time priority refresh**: when `FAIRNESS_PRIORITY_REFRESH_RETRIES > 0`, the priority of the candidate request (the heap root) is recalculated against current usage before it is released. If a fresher priority would put it behind another waiting request, it is reinserted and the next candidate is tried instead.
+- **Heap rebuild fallback**: when dequeue-time refresh retries are exhausted *and* the current queue depth is at or below `FAIRNESS_REBUILD_THRESHOLD`, all queued item priorities are recalculated from current usage and the heap is fully rebuilt. This bounds the staleness of the entire queue while protecting against expensive rebuilds on large queues.
 
 ## Prerequisites
 
@@ -81,17 +70,16 @@ The queue also supports the following runtime protections:
 
 ## Enable Fairness Scheduling
 
-The simplest way to enable the priority queue with its default user-fairness strategy is through the Helm values used by the Kthena Router chart.
+The simplest way to enable fairness scheduling is through the Helm values used by the Kthena Router chart.
 
 ```yaml
 networking:
   kthenaRouter:
-    priorityQueue:
+    fairness:
       enabled: true
-      fairness:
-        windowSize: "1h"
-        inputTokenWeight: 1.0
-        outputTokenWeight: 2.0
+      windowSize: "1h"
+      inputTokenWeight: 1.0
+      outputTokenWeight: 2.0
 ```
 
 Apply the change with Helm:
@@ -103,60 +91,59 @@ helm upgrade --install kthena charts/kthena \
   -f your-values.yaml
 ```
 
-This config enables the priority queue (which defaults to the user-fairness strategy) and sets the token tracking window and token weighting used to accumulate recent usage. You do not need to select a strategy explicitly: user fairness is used unless `sessionBoost.enabled` is set.
+This config enables fairness scheduling and sets the token tracking window and token weighting used to accumulate recent usage.
 
 ## Advanced Configuration
 
-The router supports additional environment variables beyond the basic Helm values above. Queue-level knobs use the `PRIORITY_QUEUE_*` prefix because they apply to whichever strategy is active; the user-fairness strategy weights use the `FAIRNESS_*` prefix. These can be set directly on the `kthena-router` Deployment when you need finer control over dequeue policy or queue scoring.
+The router supports additional fairness environment variables beyond the basic Helm values above. These can be set directly on the `kthena-router` Deployment when you need finer control over dequeue policy or queue scoring.
 
 ```yaml
 env:
-# Priority queue (queue-level, strategy-agnostic)
-- name: ENABLE_PRIORITY_QUEUE
+- name: ENABLE_FAIRNESS_SCHEDULING
   value: "true"
-- name: PRIORITY_QUEUE_TIMEOUT
+- name: FAIRNESS_QUEUE_TIMEOUT
   value: "45s"
-- name: PRIORITY_QUEUE_MAX_CONCURRENT
+- name: FAIRNESS_MAX_CONCURRENT
   value: "32"
-- name: PRIORITY_QUEUE_MAX_QPS
+- name: FAIRNESS_MAX_QPS
   value: "100"
-- name: PRIORITY_QUEUE_REFRESH_RETRIES
-  value: "2"
-- name: PRIORITY_QUEUE_REBUILD_THRESHOLD
-  value: "64"
-# User-fairness strategy (default strategy scoring)
 - name: FAIRNESS_PRIORITY_TOKEN_WEIGHT
   value: "1.0"
 - name: FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT
   value: "0.2"
+- name: FAIRNESS_PRIORITY_REFRESH_RETRIES
+  value: "2"
+- name: FAIRNESS_REBUILD_THRESHOLD
+  value: "64"
 ```
 
 ## Configuration Reference
 
-### Priority Queue Settings (queue-level)
+### Core Settings
 
-These settings apply to the priority queue itself and are shared by all strategies.
+| Environment Variable           | Purpose                                               | Default              | Notes                                                                 |
+| ------------------------------ | ----------------------------------------------------- | -------------------- | --------------------------------------------------------------------- |
+| `ENABLE_FAIRNESS_SCHEDULING`   | Enables fairness scheduling in the router             | `false`              | Global feature switch. Mutually exclusive with `ENABLE_SESSION_BOOST` |
+| `FAIRNESS_WINDOW_SIZE`         | Sliding window used to track recent usage             | runtime default `5m` | The Helm chart default sets this to `1h` when fairness is enabled     |
+| `FAIRNESS_INPUT_TOKEN_WEIGHT`  | Weight applied to input tokens when recording usage   | `1.0`                | Used by the token tracker                                             |
+| `FAIRNESS_OUTPUT_TOKEN_WEIGHT` | Weight applied to output tokens when recording usage  | `2.0`                | Used by the token tracker                                             |
+| `FAIRNESS_QUEUE_TIMEOUT`       | Maximum time a request may wait in the fairness queue | `60s`                | Waiting longer returns a timeout to the client                        |
 
-| Environment Variable               | Purpose                                                              | Default | Notes                                                                      |
-| ---------------------------------- | -------------------------------------------------------------------- | ------- | -------------------------------------------------------------------------- |
-| `ENABLE_PRIORITY_QUEUE`            | Enables the request priority queue in the router                     | `false` | Global feature switch. When enabled, the default strategy is user fairness |
-| `PRIORITY_QUEUE_TIMEOUT`           | Maximum time a request may wait in the priority queue                | `60s`   | Waiting longer returns a timeout to the client                             |
-| `PRIORITY_QUEUE_MAX_CONCURRENT`    | Maximum in-flight requests admitted per model through the queue gate | `0`     | `0` disables semaphore mode and falls back to QPS mode                     |
-| `PRIORITY_QUEUE_MAX_QPS`           | Maximum dequeue rate in QPS mode                                     | `100`   | Used only when `PRIORITY_QUEUE_MAX_CONCURRENT=0`                           |
-| `PRIORITY_QUEUE_REFRESH_RETRIES`   | Max dequeue-time refresh/reinsert attempts before heap rebuild       | `0`     | `0` disables dequeue-time refresh                                          |
-| `PRIORITY_QUEUE_REBUILD_THRESHOLD` | Queue size threshold controlling when heap rebuild is allowed        | `64`    | Helps bound rebuild cost                                                   |
+### Queue Policy Settings
 
-### User-Fairness Strategy Settings
+| Environment Variable                | Purpose                                                                 | Default | Notes                                                  |
+| ----------------------------------- | ----------------------------------------------------------------------- | ------- | ------------------------------------------------------ |
+| `FAIRNESS_MAX_CONCURRENT`           | Maximum in-flight requests admitted per model through the fairness gate | `0`     | `0` disables semaphore mode and falls back to QPS mode |
+| `FAIRNESS_MAX_QPS`                  | Maximum dequeue rate in QPS mode                                        | `100`   | Used only when `FAIRNESS_MAX_CONCURRENT=0`             |
+| `FAIRNESS_PRIORITY_REFRESH_RETRIES` | Max dequeue-time refresh/reinsert attempts before heap rebuild          | `0`     | `0` disables dequeue-time refresh                      |
+| `FAIRNESS_REBUILD_THRESHOLD`        | Queue size threshold controlling when heap rebuild is allowed           | `64`    | Helps bound rebuild cost                               |
 
-These settings are specific to the default user-fairness strategy and control how each user's recent usage is tracked and scored.
+### Priority Score Settings
 
-| Environment Variable                   | Purpose                                                | Default              | Notes                                                                       |
-| -------------------------------------- | ------------------------------------------------------ | -------------------- | --------------------------------------------------------------------------- |
-| `FAIRNESS_WINDOW_SIZE`                 | Sliding window used to track recent usage              | runtime default `5m` | The Helm chart default sets this to `1h` when the priority queue is enabled |
-| `FAIRNESS_INPUT_TOKEN_WEIGHT`          | Weight applied to input tokens when recording usage    | `1.0`                | Used by the token tracker                                                   |
-| `FAIRNESS_OUTPUT_TOKEN_WEIGHT`         | Weight applied to output tokens when recording usage   | `2.0`                | Used by the token tracker                                                   |
-| `FAIRNESS_PRIORITY_TOKEN_WEIGHT`       | Weight of tracked token usage in the final queue score | `1.0`                | Multiplies the tracked weighted token total                                 |
-| `FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT` | Weight of request count in the final queue score       | `0.0`                | Enables composite token + request-count priority                            |
+| Environment Variable                   | Purpose                                                | Default | Notes                                            |
+| -------------------------------------- | ------------------------------------------------------ | ------- | ------------------------------------------------ |
+| `FAIRNESS_PRIORITY_TOKEN_WEIGHT`       | Weight of tracked token usage in the final queue score | `1.0`   | Multiplies the tracked weighted token total      |
+| `FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT` | Weight of request count in the final queue score       | `0.0`   | Enables composite token + request-count priority |
 
 ## Choosing Good Settings
 
@@ -164,10 +151,10 @@ Start with the defaults unless you have a clear throughput or fairness issue to 
 
 Recommended tuning guidance:
 
-- **Latency-sensitive online serving**: use `PRIORITY_QUEUE_MAX_CONCURRENT` so dequeue is tied to actual in-flight capacity instead of a fixed release rate.
+- **Latency-sensitive online serving**: use `FAIRNESS_MAX_CONCURRENT` so dequeue is tied to actual in-flight capacity instead of a fixed release rate.
 - **Stable, simple rollout**: keep `FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT=0.0` and tune only token weights first.
 - **Small-request-heavy workloads**: add a small non-zero `FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT` so users sending many tiny requests do not dominate the queue.
-- **Rapidly changing usage patterns**: enable bounded refresh with `PRIORITY_QUEUE_REFRESH_RETRIES=1` or `2`.
+- **Rapidly changing usage patterns**: enable bounded refresh with `FAIRNESS_PRIORITY_REFRESH_RETRIES=1` or `2`.
 - **Long prompts and expensive generations**: increase `FAIRNESS_OUTPUT_TOKEN_WEIGHT` if generated tokens are materially more expensive than prompt ingestion in your environment.
 
 ## Example Scenarios
@@ -182,17 +169,17 @@ If the same user sends several requests in sequence, Kthena preserves FIFO order
 
 ### 3. Match Admission to Backend Capacity
 
-If the backend safely handles only 16 concurrent requests, set `PRIORITY_QUEUE_MAX_CONCURRENT=16`. The queue then becomes capacity-aware instead of pushing requests at a fixed rate that may be too low or too high for the backend.
+If the backend safely handles only 16 concurrent requests, set `FAIRNESS_MAX_CONCURRENT=16`. The queue then becomes capacity-aware instead of pushing requests at a fixed rate that may be too low or too high for the backend.
 
 ## Verify Fairness Scheduling
 
 ### 1. Check Router Environment
 
 ```bash
-kubectl -n kthena-system get deployment kthena-router -o yaml | grep -E 'PRIORITY_QUEUE|FAIRNESS'
+kubectl -n kthena-system get deployment kthena-router -o yaml | grep FAIRNESS
 ```
 
-Confirm that the router is running with the priority queue and fairness variables you expect.
+Confirm that the router is running with the fairness variables you expect.
 
 ### 2. Inspect Prometheus Metrics
 
@@ -237,7 +224,7 @@ The router could not resolve a user identity for the request. Verify your auth a
 
 ### Fairness is enabled but throughput is lower than expected
 
-If `PRIORITY_QUEUE_MAX_CONCURRENT=0`, the queue runs in fixed-QPS mode. Increase `PRIORITY_QUEUE_MAX_QPS` or switch to concurrency-gated mode with `PRIORITY_QUEUE_MAX_CONCURRENT`.
+If `FAIRNESS_MAX_CONCURRENT=0`, the queue runs in fixed-QPS mode. Increase `FAIRNESS_MAX_QPS` or switch to concurrency-gated mode with `FAIRNESS_MAX_CONCURRENT`.
 
 ### Queue wait times remain high even after enabling fairness
 
@@ -245,11 +232,11 @@ Fairness improves distribution during contention, but it does not create capacit
 
 ### Priority does not seem to react quickly enough to recent traffic
 
-Reduce `FAIRNESS_WINDOW_SIZE` for more responsiveness, or enable dequeue-time refresh with `PRIORITY_QUEUE_REFRESH_RETRIES`.
+Reduce `FAIRNESS_WINDOW_SIZE` for more responsiveness, or enable dequeue-time refresh with `FAIRNESS_PRIORITY_REFRESH_RETRIES`.
 
 ## Related Guides
 
-- [Session Boost Queue](./session-boost) — the alternative priority-queue strategy
+- [Session Boost Queue](./session-boost) — the mutually exclusive prefix-cache strategy
 - [Router Routing](./router-routing)
 - [Router Rate Limiting](./rate-limit)
 - [Router Observability](./router-observability)

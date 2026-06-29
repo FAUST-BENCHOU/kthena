@@ -68,40 +68,40 @@ networking:
         keyFile: /etc/tls/tls.key
         # -- Secret name for storing webhook certificates.
         secretName: kthena-router-webhook-certs
-    # priorityQueue configures the per-model request priority queue. User fairness
-    # is the default priority strategy; session boost is an alternative strategy.
-    priorityQueue:
-      # -- Enable the request priority queue (default strategy: user fairness).
+    # fairness configures the per-model user-fairness queue, which orders requests
+    # by each user's recent token usage. It is mutually exclusive with sessionBoost.
+    fairness:
+      # -- Enable user-fairness scheduling. Mutually exclusive with sessionBoost.
       enabled: false
-      # -- Queue-level global total inflight request limit admitted to backends.<br/>
-      # Shared by all strategies; size it as estimated per-pod concurrency x pod count.<br/>
-      # `0` or unset uses the router default (16).
+      # -- User-fairness strategy: sliding window duration for token usage tracking.
+      windowSize: "1h"
+      # -- User-fairness strategy: weight multiplier for input tokens.
+      inputTokenWeight: 1.0
+      # -- User-fairness strategy: weight multiplier for output tokens.
+      outputTokenWeight: 2.0
+      # -- Global total inflight request limit admitted through the fairness gate.<br/>
+      # `0` or unset falls back to QPS-based rate limiting.
       maxConcurrent: 0
-      # fairness holds settings for the default user-fairness priority strategy.
-      fairness:
-        # -- User-fairness strategy: sliding window duration for token usage tracking.
-        windowSize: "1h"
-        # -- User-fairness strategy: weight multiplier for input tokens.
-        inputTokenWeight: 1.0
-        # -- User-fairness strategy: weight multiplier for output tokens.
-        outputTokenWeight: 2.0
-      # sessionBoost selects the session-boost strategy (requires `priorityQueue.enabled=true`).
-      sessionBoost:
-        # -- Switch the priority queue to the session-boost strategy.<br/>
-        # Replaces the default per-user fairness strategy with session-aware boosting
-        # (the two strategies are mutually exclusive).
-        enabled: false
-        # -- HTTP header used to identify conversation sessions.
-        header: "X-Session-ID"
-        # -- Maximum number of recently-completed sessions kept warm for boosting.<br/>
-        # Bounds an LRU cache; the least-recently-used session is evicted automatically.<br/>
-        # Size it by the number of concurrent conversations to keep boosted.
-        maxSessions: 4096
-        # -- Wait time after a request completes for a same-session follow-up.<br/>
-        # Disabled by default (`0s`).
-        gracePeriod: "0s"
-        # -- Interval at which the queue polls backend pod metrics for capacity.
-        pollInterval: "100ms"
+    # sessionBoost configures session-aware boosting to maximize prefix cache hits
+    # for multi-turn conversations. It is mutually exclusive with fairness.
+    sessionBoost:
+      # -- Enable session-boost scheduling. Mutually exclusive with fairness.
+      enabled: false
+      # -- HTTP header used to identify conversation sessions.
+      header: "X-Session-ID"
+      # -- Maximum number of recently-completed sessions kept warm for boosting.<br/>
+      # Bounds an LRU cache; the least-recently-used session is evicted automatically.<br/>
+      # Size it by the number of concurrent conversations to keep boosted.
+      maxSessions: 4096
+      # -- Maximum inflight requests admitted per backend pod.<br/>
+      # Total inflight limit is this value times the number of backend pods.<br/>
+      # `0` or unset uses the router default (16).
+      inflightPerPod: 16
+      # -- Wait time after a request completes for a same-session follow-up.<br/>
+      # Disabled by default (`0s`).
+      gracePeriod: "0s"
+      # -- Interval at which the queue polls backend pod metrics for capacity.
+      pollInterval: "100ms"
     gatewayAPI:
       # -- Enable Gateway API related features.
       enabled: false

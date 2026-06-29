@@ -69,11 +69,11 @@ func getEnvBool(key string, fallback bool) bool {
 	return fallback
 }
 
-// EnablePriorityQueue is the master switch for the router's per-model request
-// priority queue. The priority queue admits requests according to a pluggable
-// priority strategy; user fairness is the default strategy and session boost is
-// an alternative strategy selected via EnableSessionBoost.
-var EnablePriorityQueue = getEnvBool("ENABLE_PRIORITY_QUEUE", false)
+// EnableFairnessScheduling enables the router's per-model user-fairness queue,
+// which orders requests by each user's recent token usage. EnableSessionBoost
+// enables session-aware boosting to maximize prefix cache reuse. The two are
+// mutually exclusive scheduling strategies; enable at most one.
+var EnableFairnessScheduling = getEnvBool("ENABLE_FAIRNESS_SCHEDULING", false)
 var EnableSessionBoost = getEnvBool("ENABLE_SESSION_BOOST", false)
 
 type Router struct {
@@ -89,9 +89,9 @@ type Router struct {
 	connectorFactory *connectors.Factory
 
 	// Priority queue configuration
-	priorityQueueTimeout time.Duration
-	tokenWeight          float64 // Weight for token-based priority in the fairness strategy (default 1.0)
-	requestNumWeight     float64 // Weight for request-count-based priority in the fairness strategy (default 0.0)
+	queueTimeout     time.Duration
+	tokenWeight      float64 // Weight for token-based priority in the fairness strategy (default 1.0)
+	requestNumWeight float64 // Weight for request-count-based priority in the fairness strategy (default 0.0)
 }
 
 // ActiveRequestCount returns the number of requests currently being handled by the router.
@@ -100,10 +100,10 @@ func (r *Router) ActiveRequestCount() int64 {
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
-	// Session boost is an alternative priority-queue strategy and requires the
-	// priority queue to be enabled. Warn if it is requested on its own.
-	if EnableSessionBoost && !EnablePriorityQueue {
-		klog.Warningf("ENABLE_SESSION_BOOST=true requires ENABLE_PRIORITY_QUEUE=true; session boost will be ignored")
+	// User fairness and session boost are mutually exclusive scheduling strategies.
+	// Enabling both is a configuration error.
+	if EnableFairnessScheduling && EnableSessionBoost {
+		klog.Fatalf("ENABLE_FAIRNESS_SCHEDULING and ENABLE_SESSION_BOOST are mutually exclusive; enable only one")
 	}
 
 	// Create a unified rate limiter for all models
@@ -171,30 +171,30 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	}
 
 	return &Router{
-		store:                store,
-		scheduler:            scheduler.NewScheduler(store, routerConfig),
-		authenticator:        auth.NewJWTAuthenticator(routerConfig),
-		loadRateLimiter:      loadRateLimiter,
-		accessLogger:         accessLogger,
-		metrics:              metricsInstance,
-		tokenizer:            tokenizerInstance,
-		connectorFactory:     connectors.NewDefaultFactory(),
-		priorityQueueTimeout: parsePriorityQueueTimeout(),
-		tokenWeight:          parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
-		requestNumWeight:     parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
+		store:            store,
+		scheduler:        scheduler.NewScheduler(store, routerConfig),
+		authenticator:    auth.NewJWTAuthenticator(routerConfig),
+		loadRateLimiter:  loadRateLimiter,
+		accessLogger:     accessLogger,
+		metrics:          metricsInstance,
+		tokenizer:        tokenizerInstance,
+		connectorFactory: connectors.NewDefaultFactory(),
+		queueTimeout:     parseQueueTimeout(),
+		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
+		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 	}
 }
 
-const defaultPriorityQueueTimeout = 60 * time.Second
+const defaultQueueTimeout = 60 * time.Second
 
-func parsePriorityQueueTimeout() time.Duration {
-	if s, ok := os.LookupEnv("PRIORITY_QUEUE_TIMEOUT"); ok {
+func parseQueueTimeout() time.Duration {
+	if s, ok := os.LookupEnv("FAIRNESS_QUEUE_TIMEOUT"); ok {
 		if d, err := time.ParseDuration(s); err == nil && d > 0 {
 			return d
 		}
-		klog.Warningf("Invalid PRIORITY_QUEUE_TIMEOUT %q, using default %v", s, defaultPriorityQueueTimeout)
+		klog.Warningf("Invalid FAIRNESS_QUEUE_TIMEOUT %q, using default %v", s, defaultQueueTimeout)
 	}
-	return defaultPriorityQueueTimeout
+	return defaultQueueTimeout
 }
 
 func parseEnvFloat(key string, fallback float64) float64 {
@@ -328,17 +328,15 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Store metrics recorder in context for use in other functions
 		c.Set("metricsRecorder", metricsRecorder)
 
-		// step 3.1: direct load balancing when the priority queue is disabled.
-		// Session boost is a priority-queue strategy and has no effect unless the
-		// priority queue is enabled.
-		if !EnablePriorityQueue {
-			r.doLoadbalance(c, modelRequest)
+		// step 3.1: direct load balancing when neither fairness scheduling nor
+		// session boost is enabled.
+		if !EnableFairnessScheduling && !EnableSessionBoost {
+			_ = r.doLoadbalance(c, modelRequest)
 			return
 		}
 
-		// step 3.2: priority queue scheduling. The queue orders requests by the
-		// active priority strategy: per-user fairness by default, or session
-		// boost when it is enabled.
+		// step 3.2: queue scheduling. The queue orders requests by the active
+		// strategy: per-user fairness or session boost (mutually exclusive).
 		if err := r.handleFairnessScheduling(c, modelRequest, requestID, modelName); err != nil {
 			accesslog.SetError(c, "scheduling", err.Error())
 			c.Set("finishReason", "scheduling")
@@ -347,7 +345,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 	}
 }
 
-func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
+func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error {
 	modelName := modelRequest["model"].(string)
 
 	// Check if this is an InferencePool request from HTTPRoute
@@ -386,7 +384,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 			klog.Errorf("failed to get pods and model server: %v, %v", modelServerName, err)
 			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("can't find model server: %v", modelServerName))
 			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find model server: %v", modelServerName))
-			return
+			return fmt.Errorf("can't find model server: %v", modelServerName)
 		}
 
 		model := modelServer.Spec.Model
@@ -405,7 +403,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 			klog.Errorf("failed to get inference pool: %v", inferencePoolName)
 			accesslog.SetError(c, "inference_pool_discovery", fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
 			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find inference pool: %v", inferencePoolName))
-			return
+			return fmt.Errorf("can't find inference pool: %v", inferencePoolName)
 		}
 
 		// Get pods from InferencePool
@@ -414,7 +412,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 			klog.Errorf("failed to get pods for inference pool: %v, %v", inferencePoolName, err)
 			accesslog.SetError(c, "pod_discovery", fmt.Sprintf("can't find pods for inference pool: %v", inferencePoolName))
 			c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find pods for inference pool: %v", inferencePoolName))
-			return
+			return fmt.Errorf("can't find pods for inference pool: %v", inferencePoolName)
 		}
 
 		// Get target port from InferencePool
@@ -422,7 +420,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 			klog.Errorf("inference pool %v has no target ports", inferencePoolName)
 			accesslog.SetError(c, "port_discovery", fmt.Sprintf("inference pool %v has no target ports", inferencePoolName))
 			c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("inference pool %v has no target ports", inferencePoolName))
-			return
+			return fmt.Errorf("inference pool %v has no target ports", inferencePoolName)
 		}
 		// Use the first target port
 		port = int32(inferencePool.Spec.TargetPorts[0].Number)
@@ -431,7 +429,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	} else {
 		accesslog.SetError(c, "route_not_found", "route not found")
 		c.AbortWithStatusJSON(http.StatusNotFound, "route not found")
-		return
+		return fmt.Errorf("route not found")
 	}
 
 	// Common scheduling logic for both ModelServer and InferencePool
@@ -441,12 +439,12 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		if prompt, ok = cached.(*common.ChatMessage); !ok {
 			accesslog.SetError(c, "prompt_parsing", "internal error: invalid prompt type")
 			c.AbortWithStatusJSON(http.StatusInternalServerError, "internal error")
-			return
+			return fmt.Errorf("invalid prompt type")
 		}
 	} else {
 		accesslog.SetError(c, "prompt_parsing", "prompt not found")
 		c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
-		return
+		return fmt.Errorf("prompt not found")
 	}
 
 	// Get metrics recorder from gin context
@@ -482,7 +480,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	if err != nil {
 		accesslog.SetError(c, "scheduling", fmt.Sprintf("can't schedule to target pod: %v", err))
 		c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("can't schedule to target pod: %v", err))
-		return
+		return fmt.Errorf("can't schedule to target pod: %v", err)
 	}
 
 	// Set complete request routing information in access log
@@ -507,7 +505,9 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 		klog.Errorf("request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
 		accesslog.SetError(c, "proxy", "request processing failed")
 		c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
+		return err
 	}
+	return nil
 }
 
 func ParseModelRequest(c *gin.Context) (ModelRequest, error) {
@@ -1081,7 +1081,7 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		requestID, userId, modelName)
 
 	// Create request-scoped context that unifies client disconnect and server timeout
-	reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.priorityQueueTimeout)
+	reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.queueTimeout)
 	defer cancel()
 
 	var pri float64
@@ -1120,11 +1120,12 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		}
 		klog.V(4).Infof("[FairnessScheduling] request dequeued: reqID=%s user=%s model=%s sessionBoost=%v waitTime=%v",
 			requestID, userId, modelName, queueReq.SessionBoost, time.Since(queueReq.RequestTime))
-		r.doLoadbalance(c, modelRequest)
+		lbErr := r.doLoadbalance(c, modelRequest)
 
-		// After successful proxy, mark the session request as completed so follow-up
-		// requests from the same session get priority boost for prefix cache.
-		if sessionID != "" {
+		// After a successful proxy, mark the session request as completed so follow-up
+		// requests from the same session get priority boost for prefix cache. Skip on
+		// failure: a failed request did not warm any backend prefix cache.
+		if lbErr == nil && sessionID != "" {
 			r.store.MarkSessionRequestCompleted(modelName, sessionID)
 		}
 		return nil
@@ -1134,7 +1135,7 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 		}
 		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
 			klog.Errorf("[FairnessScheduling] request timed out in queue: reqID=%s sessionID=%s user=%s model=%s timeout=%v",
-				requestID, sessionID, userId, modelName, r.priorityQueueTimeout)
+				requestID, sessionID, userId, modelName, r.queueTimeout)
 			c.AbortWithStatusJSON(http.StatusGatewayTimeout, "Request processing timed out")
 			return fmt.Errorf("request processing timed out in fairness queue")
 		}

@@ -17,7 +17,7 @@ creation-date: 2026-04-23
 
 ### Summary
 
-This proposal refines the router's **user-fairness priority strategy** — the default strategy of the per-model request priority queue (the alternative being the [session-boost strategy](./session-boost-queue.md)). It improves fairness scheduling by including the
+This proposal refines the router's **user-fairness priority strategy** — the default strategy of the per-model request priority queue (the alternative being the [session-boost strategy](./session-boost-strategy.md)). It improves fairness scheduling by including the
 estimated cost of the current request in the enqueue priority. The existing
 fairness model already tracks historical usage in a sliding window after
 requests complete. However, enqueue priority based only on historical usage can

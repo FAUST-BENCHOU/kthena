@@ -38,6 +38,11 @@ import (
 // can accept a new request without queuing.
 type BackendWaitingChecker func() bool
 
+// PodCounter returns the number of backend pods currently serving a model. It is
+// used in session-boost mode to scale the total inflight limit by the number of
+// pods (InflightPerPod * podCount).
+type PodCounter func() int
+
 // SessionTracker tracks recently completed sessions for priority boosting using
 // a bounded LRU cache. It remembers the N most-recently-completed sessions (N is
 // the configured capacity); follow-up requests belonging to one of those sessions
@@ -188,7 +193,7 @@ func (pq *RequestPriorityQueue) runDirectMode(ctx context.Context) {
 
 // runBackpressureMode dequeues requests only when backend pods have capacity.
 // Uses two-level admission control:
-//  1. Inflight limit: at most MaxConcurrent requests in flight across all backends.
+//  1. Inflight limit: at most InflightPerPod requests in flight per backend pod.
 //  2. Backend metrics check: at least one pod reports capacity available.
 //
 // Session Grace Period: When SessionBoostGracePeriod > 0, a release event triggers
@@ -355,11 +360,19 @@ func (pq *RequestPriorityQueue) drainCancelledLocked() int {
 // the queue is empty. This avoids the one-request-per-tick bottleneck during
 // initial ramp-up and whenever spare capacity exists.
 func (pq *RequestPriorityQueue) tryBackpressureDequeue(ctx context.Context) {
-	// In session-boost mode, MaxConcurrent is the global (total) inflight limit.
-	// Operators size it from the estimated per-pod concurrency and pod count.
-	maxInflight := int64(pq.config.MaxConcurrent)
-	if maxInflight <= 0 {
-		maxInflight = int64(defaultSessionBoostMaxConcurrent)
+	// In session-boost mode, the total inflight limit is InflightPerPod scaled by
+	// the number of backend pods serving the model.
+	perPod := pq.config.InflightPerPod
+	if perPod <= 0 {
+		perPod = defaultSessionBoostInflightPerPod
+	}
+	maxInflight := int64(perPod)
+	podCount := 0
+	if pq.podCounter != nil {
+		podCount = pq.podCounter()
+		if podCount > 0 {
+			maxInflight = int64(podCount) * int64(perPod)
+		}
 	}
 
 	for {
@@ -369,8 +382,8 @@ func (pq *RequestPriorityQueue) tryBackpressureDequeue(ctx context.Context) {
 			pq.mu.Lock()
 			drained := pq.drainCancelledLocked()
 			pq.mu.Unlock()
-			klog.V(4).Infof("[SessionBoost] backpressure: inflight limit reached, inflight=%d maxInflight=%d drainedCancelled=%d",
-				currentInflight, maxInflight, drained)
+			klog.V(4).Infof("[SessionBoost] backpressure: inflight limit reached, inflight=%d maxInflight=%d pods=%d perPod=%d drainedCancelled=%d",
+				currentInflight, maxInflight, podCount, perPod, drained)
 			return
 		}
 

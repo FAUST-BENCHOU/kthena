@@ -34,7 +34,7 @@ Enabling session boost therefore reconfigures the same per-model priority queue 
 
 #### Goals
 
-1. **Simple activation**: Session boost can be enabled via `ENABLE_SESSION_BOOST=true` on top of the priority queue (`ENABLE_PRIORITY_QUEUE=true`). Because session boost is a strategy of the priority queue, the priority queue is a prerequisite; if session boost is requested without it, the router logs a warning and ignores it.
+1. **Simple activation**: Session boost can be enabled via `ENABLE_SESSION_BOOST=true`. It is a scheduling strategy mutually exclusive with user fairness; enabling both is a configuration error.
 2. **Configurable session identification**: Users can configure which HTTP header identifies conversation sessions via `SESSION_BOOST_HEADER` (e.g., `X-Session-ID`).
 3. **KV cache optimization**: Prioritize follow-up requests from recently completed sessions to maximize warm cache hits.
 4. **Grace period (advanced, off by default)**: An optional, tricky tuning knob that, after a request completes, briefly holds the dequeue slot for a potential follow-up from the same session before dispatching unrelated requests. It is **disabled by default** and should only be enabled by operators who fully understand that it deliberately delays unrelated requests in exchange for a higher same-session prefix-cache hit rate.
@@ -122,7 +122,7 @@ User A, Session "conv-123":
 
   Turn 1: "Hello, tell me about Kubernetes"
   ┌──────────┐    ┌──────────┐    ┌──────────────┐    ┌────────────────┐
-  │ Enqueue  │──▶│  Dequeue │───▶│ Process on   │──▶│ MarkRequest    │
+  │ Enqueue  │──> │  Dequeue │───>│ Process on   │──> │ MarkRequest    │
   │ (no      │    │  (normal │    │ Pod-X        │    │ Completed      │
   │  boost)  │    │   order) │    │              │    │ ("conv-123")   │
   └──────────┘    └──────────┘    └──────────────┘    └───────┬────────┘
@@ -131,14 +131,14 @@ User A, Session "conv-123":
                                                               │
   Turn 2: "Can you give more details on pods?"                │
   ┌──────────┐                                                │
-  │  Enqueue │ ◀── HasRecentCompletion("conv-123") = true ───┘
+  │  Enqueue │ <── HasRecentCompletion("conv-123") = true  ───┘
   │  (BOOST  │     (still in LRU cache)
   │   =true) │
   └────┬─────┘
        │
        ▼ (Promoted to heap head, ahead of all non-boosted requests)
   ┌──────────┐    ┌──────────────┐
-  │  Dequeue │ ─▶ │  Process on  │  ← Prefix cache HIT! TTFT reduced 50-80%
+  │  Dequeue │ ─> │  Process on  │  ← Prefix cache HIT! TTFT reduced 50-80%
   │  (first!)│    │  Pod-X*      │    (*if session sticky also routes here)
   └──────────┘    └──────────────┘
 ```
@@ -219,15 +219,14 @@ The net effect is a strict precedence: **grace timing → inflight gate → back
 
 #### Configuration
 
-| Environment Variable            | Default        | Description                                                                                                                                                                                                                                      |
-| ------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ENABLE_PRIORITY_QUEUE`         | `false`        | Enable the priority queue. Required for session boost, which runs as a strategy of this queue                                                                                                                                                    |
-| `ENABLE_SESSION_BOOST`          | `false`        | Enable the session-boost strategy on the priority queue (requires `ENABLE_PRIORITY_QUEUE=true`)                                                                                                                                                  |
-| `SESSION_BOOST_HEADER`          | `X-Session-ID` | HTTP header used to identify conversation sessions                                                                                                                                                                                               |
-| `SESSION_BOOST_MAX_SESSIONS`    | `4096`         | Maximum number of recently-completed sessions kept warm for boosting. Bounds an LRU cache; the least-recently-used session is evicted when exceeded. Sized by session count, not time                                                            |
-| `SESSION_BOOST_GRACE_PERIOD`    | `0`            | Wait time after release for same-session follow-up. Disabled by default; enable only when you understand the latency trade-off                                                                                                                   |
-| `SESSION_BOOST_POLL_INTERVAL`   | `100ms`        | Backend capacity polling interval                                                                                                                                                                                                                |
-| `PRIORITY_QUEUE_MAX_CONCURRENT` | `16`           | Queue-level setting shared with the user-fairness strategy; it is the global (total) inflight limit when the session-boost strategy is active. Operators size it from the estimated per-pod concurrency multiplied by the number of backend pods |
+| Environment Variable             | Default        | Description                                                                                                                                                                           |
+| -------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ENABLE_SESSION_BOOST`           | `false`        | Enable the session-boost scheduling strategy (mutually exclusive with `ENABLE_FAIRNESS_SCHEDULING`)                                                                                   |
+| `SESSION_BOOST_HEADER`           | `X-Session-ID` | HTTP header used to identify conversation sessions                                                                                                                                    |
+| `SESSION_BOOST_MAX_SESSIONS`     | `4096`         | Maximum number of recently-completed sessions kept warm for boosting. Bounds an LRU cache; the least-recently-used session is evicted when exceeded. Sized by session count, not time |
+| `SESSION_BOOST_GRACE_PERIOD`     | `0`            | Wait time after release for same-session follow-up. Disabled by default; enable only when you understand the latency trade-off                                                        |
+| `SESSION_BOOST_POLL_INTERVAL`    | `100ms`        | Backend capacity polling interval                                                                                                                                                     |
+| `SESSION_BOOST_INFLIGHT_PER_POD` | `16`           | Inflight requests admitted per backend pod; total inflight = perPod x backend pod count. Size it from the estimated per-pod concurrency (e.g. vLLM's --max-num-seqs)                  |
 
 ### Design Details
 
@@ -296,7 +295,7 @@ When a request with the configured session header (e.g., `X-Session-ID: conv-abc
 
 The queue uses two-level admission control:
 
-1. **Inflight limit**: At most `MaxConcurrent` requests can be in-flight across all backends simultaneously. `MaxConcurrent` is the queue-level limit shared with the user-fairness strategy (`PRIORITY_QUEUE_MAX_CONCURRENT`); operators size it from the estimated per-pod concurrency and pod count. This prevents flooding backends between metric scrapes.
+1. **Inflight limit**: At most `InflightPerPod` requests can be in-flight per backend pod; the total limit scales with pod count (`SESSION_BOOST_INFLIGHT_PER_POD`). This prevents flooding backends between metric scrapes.
 2. **Backend metrics check**: The `BackendWaitingChecker` polls backend pod metrics (e.g., vLLM's `RequestWaitingNum`) to confirm at least one pod has capacity.
 
 When a request completes (Release), the queue immediately attempts to dequeue the next request (release-driven dequeue) rather than waiting for the next polling tick, ensuring minimal latency between sequential requests.

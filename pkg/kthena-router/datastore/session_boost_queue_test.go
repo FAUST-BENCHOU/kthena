@@ -30,13 +30,13 @@ func sessionBoostConfig() FairnessQueueConfig {
 }
 
 // newSessionBoostQueue constructs a session-boost-mode priority queue for tests.
-func newSessionBoostQueue(cfg FairnessQueueConfig, checker ...BackendWaitingChecker) *RequestPriorityQueue {
-	return NewRequestPriorityQueueWithConfig(nil, cfg, nil, checker...)
+func newSessionBoostQueue(cfg FairnessQueueConfig, checker BackendWaitingChecker) *RequestPriorityQueue {
+	return NewRequestPriorityQueueWithConfig(nil, cfg, nil, checker)
 }
 
 func TestSessionBoostQueue_BasicPriorityOrdering(t *testing.T) {
 	cfg := sessionBoostConfig()
-	q := newSessionBoostQueue(cfg)
+	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
 	// Simulate a completed session
@@ -91,7 +91,7 @@ func TestSessionBoostQueue_BasicPriorityOrdering(t *testing.T) {
 
 func TestSessionBoostQueue_FIFOWithinBoostStatus(t *testing.T) {
 	cfg := sessionBoostConfig()
-	q := newSessionBoostQueue(cfg)
+	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
 	now := time.Now()
@@ -122,7 +122,7 @@ func TestSessionBoostQueue_FIFOWithinBoostStatus(t *testing.T) {
 func TestSessionBoostQueue_BoostEvictedByLRU(t *testing.T) {
 	cfg := sessionBoostConfig()
 	cfg.SessionBoostMaxSessions = 2 // remember only the 2 most-recently-completed sessions
-	q := newSessionBoostQueue(cfg)
+	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
 	// conv-123 completes first; two newer sessions then complete and push it out
@@ -183,7 +183,7 @@ func TestSessionTracker_LRU(t *testing.T) {
 
 func TestSessionBoostQueue_MultipleSessions(t *testing.T) {
 	cfg := sessionBoostConfig()
-	q := newSessionBoostQueue(cfg)
+	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
 	q.MarkSessionRequestCompleted("conv-A")
@@ -242,7 +242,7 @@ func TestSessionBoostQueue_BackpressureDrainsCancelledWhenBusy(t *testing.T) {
 	cfg := sessionBoostConfig()
 	cfg.SessionBoostGracePeriod = 0
 	cfg.BackpressurePollInterval = 10 * time.Millisecond
-	cfg.MaxConcurrent = 4
+	cfg.InflightPerPod = 4
 	q := newSessionBoostQueue(cfg, checker)
 	defer q.Close()
 
@@ -289,7 +289,7 @@ func TestSessionBoostQueue_BackpressureMode(t *testing.T) {
 	cfg := sessionBoostConfig()
 	cfg.SessionBoostGracePeriod = 0
 	cfg.BackpressurePollInterval = 10 * time.Millisecond
-	cfg.MaxConcurrent = 2 // global total inflight limit
+	cfg.InflightPerPod = 2 // total inflight limit (no pod counter, perPod = total)
 	q := newSessionBoostQueue(cfg, checker)
 	defer q.Close()
 
@@ -346,7 +346,7 @@ func TestSessionBoostQueue_GracePeriod_BoostedArrives(t *testing.T) {
 	cfg := sessionBoostConfig()
 	cfg.SessionBoostGracePeriod = 200 * time.Millisecond
 	cfg.BackpressurePollInterval = 50 * time.Millisecond
-	cfg.MaxConcurrent = 1
+	cfg.InflightPerPod = 1
 	q := newSessionBoostQueue(cfg, checker)
 	defer q.Close()
 
@@ -418,7 +418,7 @@ func TestSessionBoostQueue_GracePeriod_NoBoostArrives(t *testing.T) {
 	cfg := sessionBoostConfig()
 	cfg.SessionBoostGracePeriod = 100 * time.Millisecond
 	cfg.BackpressurePollInterval = 50 * time.Millisecond
-	cfg.MaxConcurrent = 1
+	cfg.InflightPerPod = 1
 	q := newSessionBoostQueue(cfg, checker)
 	defer q.Close()
 
@@ -473,7 +473,7 @@ func TestSessionBoostQueue_GracePeriod_NoBoostArrives(t *testing.T) {
 func TestSessionBoostQueue_DirectMode(t *testing.T) {
 	// Without a backend checker, the queue should dequeue immediately
 	cfg := sessionBoostConfig()
-	q := newSessionBoostQueue(cfg)
+	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
 	q.MarkSessionRequestCompleted("session-1")
@@ -526,7 +526,7 @@ func TestSessionBoostQueue_DirectMode(t *testing.T) {
 
 func TestSessionBoostQueue_CancelledRequestsSkipped(t *testing.T) {
 	cfg := sessionBoostConfig()
-	q := newSessionBoostQueue(cfg)
+	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
 	now := time.Now()
@@ -563,7 +563,7 @@ func TestSessionBoostQueue_CancelledRequestsSkipped(t *testing.T) {
 
 func TestSessionBoostQueue_EmptySessionID(t *testing.T) {
 	cfg := sessionBoostConfig()
-	q := newSessionBoostQueue(cfg)
+	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
 	q.MarkSessionRequestCompleted("conv-123")
@@ -591,7 +591,7 @@ func TestSessionBoostQueue_EmptySessionID(t *testing.T) {
 
 func TestSessionBoostQueue_Len(t *testing.T) {
 	cfg := sessionBoostConfig()
-	q := newSessionBoostQueue(cfg)
+	q := newSessionBoostQueue(cfg, nil)
 	defer q.Close()
 
 	if q.Len() != 0 {

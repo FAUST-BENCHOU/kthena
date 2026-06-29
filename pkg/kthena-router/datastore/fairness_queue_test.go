@@ -481,7 +481,7 @@ func TestNewRequestPriorityQueueWithConfig(t *testing.T) {
 		MaxPriorityRefreshRetries: 3,
 		RebuildThreshold:          32,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil, nil)
 	if pq == nil {
 		t.Fatal("NewRequestPriorityQueueWithConfig returned nil")
 	}
@@ -501,7 +501,7 @@ func TestNewRequestPriorityQueueWithConfig_NoSemaphore(t *testing.T) {
 		MaxConcurrent: 0,
 		MaxQPS:        100,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil, nil)
 	if pq.sem != nil {
 		t.Error("Expected nil semaphore with MaxConcurrent = 0")
 	}
@@ -512,7 +512,7 @@ func TestRun_SemaphoreMode(t *testing.T) {
 		MaxConcurrent: 2,
 		MaxQPS:        0, // no QPS cap
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil, nil)
 	defer pq.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -632,7 +632,7 @@ func TestPriorityRefresh_ReinsertOnDrift(t *testing.T) {
 		MaxPriorityRefreshRetries: 3,
 		RebuildThreshold:          64,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker, nil)
 	defer pq.Close()
 
 	now := time.Now()
@@ -676,7 +676,7 @@ func TestPriorityRefresh_HeapRebuild(t *testing.T) {
 		MaxPriorityRefreshRetries: 1, // Will rebuild after 1 reinsert
 		RebuildThreshold:          64,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker, nil)
 	defer pq.Close()
 
 	now := time.Now()
@@ -710,7 +710,7 @@ func TestRelease_ReleasesPermit(t *testing.T) {
 		MaxConcurrent: 1,
 		MaxQPS:        0,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil, nil)
 	defer pq.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -770,7 +770,7 @@ func TestPriorityRefresh_SkipsHeapRebuildAboveThreshold(t *testing.T) {
 		MaxPriorityRefreshRetries: 1,
 		RebuildThreshold:          1,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker, nil)
 	defer pq.Close()
 
 	now := time.Now()
@@ -802,7 +802,7 @@ func TestPriorityRefresh_UsesCompositePriority(t *testing.T) {
 		TokenWeight:               1.0,
 		RequestNumWeight:          10.0,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, tracker, nil)
 	defer pq.Close()
 
 	now := time.Now()
@@ -831,7 +831,7 @@ func TestRun_SemaphoreMode_EmptyQueueDoesNotConsumePermit(t *testing.T) {
 		MaxConcurrent: 1,
 		MaxQPS:        0,
 	}
-	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil)
+	pq := NewRequestPriorityQueueWithConfig(nil, cfg, nil, nil)
 	defer pq.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

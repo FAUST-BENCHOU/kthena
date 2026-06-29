@@ -77,23 +77,22 @@ spec:
                   name: redis-secret
                   key: password
                   optional: true
-            # Priority queue configuration
-            - name: ENABLE_PRIORITY_QUEUE
-              value: {{ .Values.kthenaRouter.priorityQueue.enabled | quote }}
-            {{- if .Values.kthenaRouter.priorityQueue.enabled }}
-            # User-fairness strategy settings (default priority strategy)
+            # Scheduling strategy: user fairness and session boost are mutually exclusive
+            {{- if .Values.kthenaRouter.fairness.enabled }}
+            - name: ENABLE_FAIRNESS_SCHEDULING
+              value: "true"
             - name: FAIRNESS_WINDOW_SIZE
-              value: {{ .Values.kthenaRouter.priorityQueue.fairness.windowSize | quote }}
+              value: {{ .Values.kthenaRouter.fairness.windowSize | quote }}
             - name: FAIRNESS_INPUT_TOKEN_WEIGHT
-              value: {{ .Values.kthenaRouter.priorityQueue.fairness.inputTokenWeight | quote }}
+              value: {{ .Values.kthenaRouter.fairness.inputTokenWeight | quote }}
             - name: FAIRNESS_OUTPUT_TOKEN_WEIGHT
-              value: {{ .Values.kthenaRouter.priorityQueue.fairness.outputTokenWeight | quote }}
-            {{- if .Values.kthenaRouter.priorityQueue.maxConcurrent }}
-            - name: PRIORITY_QUEUE_MAX_CONCURRENT
-              value: {{ .Values.kthenaRouter.priorityQueue.maxConcurrent | quote }}
+              value: {{ .Values.kthenaRouter.fairness.outputTokenWeight | quote }}
+            {{- if .Values.kthenaRouter.fairness.maxConcurrent }}
+            - name: FAIRNESS_MAX_CONCURRENT
+              value: {{ .Values.kthenaRouter.fairness.maxConcurrent | quote }}
             {{- end }}
-            # Session boost is an alternative priority-queue strategy
-            {{- with .Values.kthenaRouter.priorityQueue.sessionBoost }}
+            {{- end }}
+            {{- with .Values.kthenaRouter.sessionBoost }}
             {{- if .enabled }}
             - name: ENABLE_SESSION_BOOST
               value: "true"
@@ -101,11 +100,14 @@ spec:
               value: {{ .header | quote }}
             - name: SESSION_BOOST_MAX_SESSIONS
               value: {{ .maxSessions | quote }}
+            {{- if .inflightPerPod }}
+            - name: SESSION_BOOST_INFLIGHT_PER_POD
+              value: {{ .inflightPerPod | quote }}
+            {{- end }}
             - name: SESSION_BOOST_GRACE_PERIOD
               value: {{ .gracePeriod | quote }}
             - name: SESSION_BOOST_POLL_INTERVAL
               value: {{ .pollInterval | quote }}
-            {{- end }}
             {{- end }}
             {{- end }}
             # Access log configuration

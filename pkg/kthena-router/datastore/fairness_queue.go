@@ -32,15 +32,9 @@ import (
 // FairnessQueueConfig holds configurable parameters for the fairness queue.
 type FairnessQueueConfig struct {
 	// MaxConcurrent is the maximum number of in-flight requests allowed for this
-	// model. Its meaning is consistent across modes: it is a global (total) limit,
-	// not a per-pod limit.
-	//   - Fairness mode: total concurrent admissions through the fairness gate.
-	//     When 0, falls back to MaxQPS-based rate limiting.
-	//   - Session-boost mode: total inflight requests admitted to the backends.
-	//     Because the queue does not know per-pod capacity, operators must size
-	//     this value themselves based on the estimated per-pod concurrency and the
-	//     number of backend pods (e.g. perPodConcurrency * podCount). When 0, a
-	//     default of defaultSessionBoostMaxConcurrent is used.
+	// model in user-fairness mode. It is a global (total) limit, not per-pod:
+	// total concurrent admissions through the fairness gate. When 0, falls back to
+	// MaxQPS-based rate limiting. It is not used in session-boost mode.
 	MaxConcurrent int
 
 	// MaxQPS is the upper-bound dequeue rate used only in ticker/QPS mode.
@@ -67,7 +61,8 @@ type FairnessQueueConfig struct {
 	SessionBoostEnabled bool
 
 	// SessionIDHeader is the HTTP header name used to identify conversation
-	// sessions. Only meaningful when SessionBoostEnabled is true.
+	// sessions. Only meaningful when SessionBoostEnabled is true. Defaults to
+	// defaultSessionBoostHeader ("X-Session-ID") when not set.
 	SessionIDHeader string
 
 	// SessionBoostMaxSessions is the maximum number of recently-completed sessions
@@ -87,16 +82,27 @@ type FairnessQueueConfig struct {
 	// BackpressurePollInterval controls how often the backpressure checker polls
 	// backend pod waiting-queue status in session-boost mode.
 	BackpressurePollInterval time.Duration
+
+	// InflightPerPod is the maximum number of inflight requests allowed per backend
+	// pod in session-boost mode. The total inflight limit is InflightPerPod times
+	// the number of backend pods serving the model. When <= 0, a default of
+	// defaultSessionBoostInflightPerPod is used. Only meaningful when
+	// SessionBoostEnabled is true.
+	InflightPerPod int
 }
 
-// defaultSessionBoostMaxConcurrent is the total inflight limit used in
-// session-boost mode when MaxConcurrent is not set (<= 0).
-const defaultSessionBoostMaxConcurrent = 16
+// defaultSessionBoostInflightPerPod is the per-pod inflight limit used in
+// session-boost mode when InflightPerPod is not set (<= 0).
+const defaultSessionBoostInflightPerPod = 16
 
 // defaultSessionBoostMaxSessions is the LRU capacity (number of recently-completed
 // sessions remembered for boosting) used when SessionBoostMaxSessions is not set
 // (<= 0). Each entry is tiny (a session ID), so the default is generous.
 const defaultSessionBoostMaxSessions = 4096
+
+// defaultSessionBoostHeader is the HTTP header used to identify conversation
+// sessions when SESSION_BOOST_HEADER is not set.
+const defaultSessionBoostHeader = "X-Session-ID"
 
 // DefaultFairnessQueueConfig returns backward-compatible defaults.
 func DefaultFairnessQueueConfig() FairnessQueueConfig {
@@ -108,9 +114,11 @@ func DefaultFairnessQueueConfig() FairnessQueueConfig {
 		TokenWeight:               1.0,
 		RequestNumWeight:          0.0,
 		SessionBoostEnabled:       false,
+		SessionIDHeader:           defaultSessionBoostHeader,
 		SessionBoostMaxSessions:   defaultSessionBoostMaxSessions,
 		SessionBoostGracePeriod:   0,
 		BackpressurePollInterval:  100 * time.Millisecond,
+		InflightPerPod:            defaultSessionBoostInflightPerPod,
 	}
 }
 
@@ -172,6 +180,7 @@ type RequestPriorityQueue struct {
 	sessionBoost   bool
 	sessionTracker *SessionTracker       // Tracks recently completed sessions for boosting
 	backendChecker BackendWaitingChecker // Optional; gates dequeue on backend capacity
+	podCounter     PodCounter            // Optional; counts backend pods for inflight scaling
 	inflightCount  atomic.Int64          // In-flight requests in session-boost mode
 	releaseCh      chan struct{}         // Signals a permit release in session-boost mode
 }
@@ -180,13 +189,13 @@ var _ heap.Interface = &RequestPriorityQueue{}
 
 // NewRequestPriorityQueue creates a new priority queue. Pass nil metrics to use defaults.
 func NewRequestPriorityQueue(metricsInstance *metrics.Metrics) *RequestPriorityQueue {
-	return NewRequestPriorityQueueWithConfig(metricsInstance, DefaultFairnessQueueConfig(), nil)
+	return NewRequestPriorityQueueWithConfig(metricsInstance, DefaultFairnessQueueConfig(), nil, nil)
 }
 
 // NewRequestPriorityQueueWithConfig creates a priority queue with explicit configuration.
 // When cfg.SessionBoostEnabled is true the queue operates in session-boost mode; an
-// optional BackendWaitingChecker may be supplied to gate dequeue on backend capacity.
-func NewRequestPriorityQueueWithConfig(metricsInstance *metrics.Metrics, cfg FairnessQueueConfig, tracker TokenTracker, checker ...BackendWaitingChecker) *RequestPriorityQueue {
+// optional BackendWaitingChecker (nil to disable) gates dequeue on backend capacity.
+func NewRequestPriorityQueueWithConfig(metricsInstance *metrics.Metrics, cfg FairnessQueueConfig, tracker TokenTracker, checker BackendWaitingChecker) *RequestPriorityQueue {
 	if metricsInstance == nil {
 		metricsInstance = metrics.DefaultMetrics
 	}
@@ -209,9 +218,7 @@ func NewRequestPriorityQueueWithConfig(metricsInstance *metrics.Metrics, cfg Fai
 		}
 		pq.sessionTracker = NewSessionTracker(maxSessions)
 		pq.releaseCh = make(chan struct{}, 1)
-		if len(checker) > 0 && checker[0] != nil {
-			pq.backendChecker = checker[0]
-		}
+		pq.backendChecker = checker
 	} else if cfg.MaxConcurrent > 0 {
 		pq.sem = make(chan struct{}, cfg.MaxConcurrent)
 	}

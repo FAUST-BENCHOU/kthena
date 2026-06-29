@@ -416,42 +416,43 @@ func (s *store) getPodRuntimeInspector() PodRuntimeInspector {
 	return s.podRuntimeInspector
 }
 
-// createFairnessQueueConfig reads the request priority queue configuration from
-// environment variables. This includes queue-level settings (PRIORITY_QUEUE_*),
-// the default user-fairness strategy weights (FAIRNESS_*), and the optional
-// session-boost strategy (SESSION_BOOST_*).
+// createFairnessQueueConfig reads the request queue configuration from
+// environment variables. This includes the user-fairness strategy settings
+// (FAIRNESS_*) and the independent session-boost strategy (SESSION_BOOST_*).
+// Fairness scheduling and session boost are mutually exclusive: enable one or
+// the other, not both.
 func createFairnessQueueConfig() FairnessQueueConfig {
 	cfg := DefaultFairnessQueueConfig()
 
-	if v := os.Getenv("PRIORITY_QUEUE_MAX_CONCURRENT"); v != "" {
+	if v := os.Getenv("FAIRNESS_MAX_CONCURRENT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			cfg.MaxConcurrent = n
 		} else {
-			klog.Warningf("Invalid PRIORITY_QUEUE_MAX_CONCURRENT: %q, using default %d", v, cfg.MaxConcurrent)
+			klog.Warningf("Invalid FAIRNESS_MAX_CONCURRENT: %q, using default %d", v, cfg.MaxConcurrent)
 		}
 	}
 
-	if v := os.Getenv("PRIORITY_QUEUE_MAX_QPS"); v != "" {
+	if v := os.Getenv("FAIRNESS_MAX_QPS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.MaxQPS = n
 		} else {
-			klog.Warningf("Invalid PRIORITY_QUEUE_MAX_QPS: %q, using default %d", v, cfg.MaxQPS)
+			klog.Warningf("Invalid FAIRNESS_MAX_QPS: %q, using default %d", v, cfg.MaxQPS)
 		}
 	}
 
-	if v := os.Getenv("PRIORITY_QUEUE_REFRESH_RETRIES"); v != "" {
+	if v := os.Getenv("FAIRNESS_PRIORITY_REFRESH_RETRIES"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			cfg.MaxPriorityRefreshRetries = n
 		} else {
-			klog.Warningf("Invalid PRIORITY_QUEUE_REFRESH_RETRIES: %q, using default %d", v, cfg.MaxPriorityRefreshRetries)
+			klog.Warningf("Invalid FAIRNESS_PRIORITY_REFRESH_RETRIES: %q, using default %d", v, cfg.MaxPriorityRefreshRetries)
 		}
 	}
 
-	if v := os.Getenv("PRIORITY_QUEUE_REBUILD_THRESHOLD"); v != "" {
+	if v := os.Getenv("FAIRNESS_REBUILD_THRESHOLD"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.RebuildThreshold = n
 		} else {
-			klog.Warningf("Invalid PRIORITY_QUEUE_REBUILD_THRESHOLD: %q, using default %d", v, cfg.RebuildThreshold)
+			klog.Warningf("Invalid FAIRNESS_REBUILD_THRESHOLD: %q, using default %d", v, cfg.RebuildThreshold)
 		}
 	}
 
@@ -476,15 +477,11 @@ func createFairnessQueueConfig() FairnessQueueConfig {
 	return cfg
 }
 
-// applySessionBoostConfigFromEnv enables session-boost mode on the priority queue
-// config when ENABLE_SESSION_BOOST=true and reads the session-boost specific
-// options from the environment. Session boost is one of the priority queue's
-// pluggable priority strategies; when it is enabled, the queue switches from the
-// default per-user fairness strategy to session-aware boosting.
-//
-// Session boost requires the priority queue to be enabled
-// (ENABLE_PRIORITY_QUEUE=true); otherwise it is ignored, since session boost is a
-// priority-queue strategy rather than a standalone queue.
+// applySessionBoostConfigFromEnv enables session-boost mode on the queue config
+// when ENABLE_SESSION_BOOST=true and reads the session-boost specific options
+// from the environment. Session boost is an independent scheduling strategy: it
+// is mutually exclusive with user fairness. When both are enabled, fairness is
+// ignored in favor of session boost and a warning is logged.
 func applySessionBoostConfigFromEnv(cfg *FairnessQueueConfig) {
 	v := os.Getenv("ENABLE_SESSION_BOOST")
 	if v == "" {
@@ -495,9 +492,8 @@ func applySessionBoostConfigFromEnv(cfg *FairnessQueueConfig) {
 		return
 	}
 
-	if !isPriorityQueueEnabled() {
-		klog.Warningf("ENABLE_SESSION_BOOST=true requires ENABLE_PRIORITY_QUEUE=true; session boost will be ignored")
-		return
+	if isFairnessSchedulingEnabled() {
+		klog.Warningf("ENABLE_SESSION_BOOST=true and ENABLE_FAIRNESS_SCHEDULING=true are mutually exclusive; using session boost")
 	}
 
 	cfg.SessionBoostEnabled = true
@@ -511,6 +507,14 @@ func applySessionBoostConfigFromEnv(cfg *FairnessQueueConfig) {
 			cfg.SessionBoostMaxSessions = n
 		} else {
 			klog.Warningf("Invalid SESSION_BOOST_MAX_SESSIONS: %q, using default %d", v, cfg.SessionBoostMaxSessions)
+		}
+	}
+
+	if v := os.Getenv("SESSION_BOOST_INFLIGHT_PER_POD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.InflightPerPod = n
+		} else {
+			klog.Warningf("Invalid SESSION_BOOST_INFLIGHT_PER_POD: %q, using default %d", v, cfg.InflightPerPod)
 		}
 	}
 
@@ -531,10 +535,10 @@ func applySessionBoostConfigFromEnv(cfg *FairnessQueueConfig) {
 	}
 }
 
-// isPriorityQueueEnabled reports whether the request priority queue is enabled via
-// the ENABLE_PRIORITY_QUEUE environment variable.
-func isPriorityQueueEnabled() bool {
-	if v := os.Getenv("ENABLE_PRIORITY_QUEUE"); v != "" {
+// isFairnessSchedulingEnabled reports whether user-fairness scheduling is enabled
+// via the ENABLE_FAIRNESS_SCHEDULING environment variable.
+func isFairnessSchedulingEnabled() bool {
+	if v := os.Getenv("ENABLE_FAIRNESS_SCHEDULING"); v != "" {
 		if enabled, err := strconv.ParseBool(v); err == nil {
 			return enabled
 		}
@@ -649,11 +653,13 @@ func (s *store) Enqueue(req *Request) error {
 		var newQueue *RequestPriorityQueue
 		if s.fairnessQueueConfig.SessionBoostEnabled {
 			// Session-boost mode: gate dequeue on backend capacity. The total
-			// inflight limit is PRIORITY_QUEUE_MAX_CONCURRENT, sized by the operator.
+			// inflight limit is SESSION_BOOST_INFLIGHT_PER_POD multiplied by the
+			// number of backend pods serving the model.
 			checker := s.makeBackendWaitingChecker(modelName)
 			newQueue = NewRequestPriorityQueueWithConfig(nil, s.fairnessQueueConfig, s.tokenTracker, checker)
+			newQueue.podCounter = s.makeBackendPodCounter(modelName)
 		} else {
-			newQueue = NewRequestPriorityQueueWithConfig(nil, s.fairnessQueueConfig, s.tokenTracker)
+			newQueue = NewRequestPriorityQueueWithConfig(nil, s.fairnessQueueConfig, s.tokenTracker, nil)
 		}
 		val, ok = s.requestWaitingQueue.LoadOrStore(modelName, newQueue)
 		if !ok {
@@ -708,6 +714,26 @@ func (s *store) makeBackendWaitingChecker(modelName string) BackendWaitingChecke
 			klog.Infof("[BackendWaitingChecker] model %s: all %d pods busy, totalWaiting=%.0f", modelName, podCount, totalWaiting)
 		}
 		return hasCapacity
+	}
+}
+
+// makeBackendPodCounter returns a PodCounter that counts how many backend pods
+// serve the given model. Session-boost mode uses it to scale the total inflight
+// limit (InflightPerPod * podCount).
+func (s *store) makeBackendPodCounter(modelName string) PodCounter {
+	return func() int {
+		podCount := 0
+		s.pods.Range(func(key, value any) bool {
+			podInfo, ok := value.(*PodInfo)
+			if !ok || podInfo == nil {
+				return true
+			}
+			if podInfo.Contains(modelName) {
+				podCount++
+			}
+			return true
+		})
+		return podCount
 	}
 }
 

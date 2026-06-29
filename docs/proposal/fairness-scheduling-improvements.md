@@ -9,7 +9,7 @@
 
 ## 1. Current Architecture
 
-> **Note:** The request queue described here is a general per-model **priority queue**. User fairness is its **default priority strategy**; an alternative **session-boost** strategy (see [Session Boost Queue](./session-boost-queue.md)) reuses the same queue. Queue-level configuration uses the `PRIORITY_QUEUE_*` environment variables, while user-fairness scoring uses the `FAIRNESS_*` variables.
+> **Note:** The request queue described here is a general per-model **priority queue**. User fairness and session boost (see [Session Boost Strategy](./session-boost-strategy.md)) are two mutually exclusive strategies that reuse the same queue. User-fairness scoring uses the `FAIRNESS_*` environment variables; session boost uses the `SESSION_BOOST_*` variables.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -18,17 +18,17 @@
 │  HTTP Request                                                          │
 │      │                                                                 │
 │      ▼                                                                 │
-│  ┌──────────┐    ┌──────────────┐    ┌────────────────────────┐       │
-│  │  Router   │───▶│ GetTokenCount│───▶│ InMemorySlidingWindow  │       │
-│  │ Handler   │    │  (priority)  │    │    TokenTracker         │       │
-│  └──────────┘    └──────────────┘    │  [user][model] → float  │       │
-│      │                               └────────────────────────┘       │
+│  ┌──────────┐    ┌──────────────┐    ┌────────────────────────┐        │
+│  │  Router  │───>│ GetTokenCount│───>│ InMemorySlidingWindow  │        │
+│  │ Handler  │    │  (priority)  │    │    TokenTracker        │        │
+│  └──────────┘    └──────────────┘    │  [user][model] → float │        │
+│      │                               └────────────────────────┘        │
 │      ▼                                                                 │
 │  ┌──────────────────────────────┐                                      │
-│  │    store.Enqueue(Request)     │                                      │
+│  │    store.Enqueue(Request)    │                                      │
 │  │  ┌────────────────────────┐  │                                      │
-│  │  │ Per-Model Priority Queue│  │   One queue per model               │
-│  │  │  (min-heap by priority) │  │   Run() goroutine @ 100 QPS        │
+│  │  │Per-Model Priority Queue│  │   One queue per model                │
+│  │  │ (min-heap by priority) │  │   Run() goroutine @ 100 QPS          │
 │  │  │                        │  │                                      │
 │  │  │  Less():               │  │                                      │
 │  │  │   same user → FIFO     │  │                                      │
@@ -39,15 +39,15 @@
 │      │                                                                 │
 │      │ <── blocks on NotifyChan (max 60s) ──┐                          │
 │      │                                      │                          │
-│      ▼                               ┌──────┴──────┐                   │
-│  ┌───────────────┐                   │  Run() loop  │                   │
-│  │doLoadbalance()│◀── close(NotifyChan) ──│  ticker @    │              │
-│  └───────────────┘                   │  10ms/tick   │                   │
-│                                      └─────────────┘                   │
+│      ▼                                   ┌──────┴──────┐               │
+│  ┌───────────────┐                       │  Run() loop │               │
+│  │doLoadbalance()│<─ close(NotifyChan) ──│  ticker @   │               │
+│  └───────────────┘                       │  10ms/tick  │               │
+│                                          └─────────────┘               │
 │      │                                                                 │
 │      ▼                                                                 │
 │  ┌──────────┐    ┌──────────────┐                                      │
-│  │ Scheduler│───▶│ Proxy to Pod │                                      │
+│  │ Scheduler│───>│ Proxy to Pod │                                      │
 │  └──────────┘    └──────────────┘                                      │
 │      │                                                                 │
 │      ▼                                                                 │
@@ -64,7 +64,7 @@
 | `handleFairnessScheduling`          | `router.go:965`     | Entry point; extracts userId, gets priority, enqueues, blocks                        |
 | `RequestPriorityQueue`              | `fairness_queue.go` | Min-heap ordered by token usage; per-model goroutine dequeues at fixed QPS           |
 | `InMemorySlidingWindowTokenTracker` | `token_tracker.go`  | Sliding-window weighted token accumulator per (user, model)                          |
-| `EnablePriorityQueue`               | `router.go`         | Global env-var kill switch (`ENABLE_PRIORITY_QUEUE`)                                 |
+| `EnableFairnessScheduling`          | `router.go`         | Global env-var kill switch (`ENABLE_FAIRNESS_SCHEDULING`)                            |
 | Metrics                             | `metrics.go`        | `kthena_router_fairness_queue_size`, `kthena_router_fairness_queue_duration_seconds` |
 
 ---
@@ -288,7 +288,7 @@ type Request struct {
 
 **Three-point cancellation:**
 
-1. **At enqueue:** Create `reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.priorityQueueTimeout)` and store `reqCtx.Done()` in the `Request`.
+1. **At enqueue:** Create `reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.queueTimeout)` and store `reqCtx.Done()` in the `Request`.
 2. **At dequeue (in `popWhenAvailable`):** After popping, check whether `req.CancelCh` is closed. If cancelled, skip (decrement metrics, continue to next).
 3. **At wait site (in `handleFairnessScheduling`):** Wait on the same request context used by the queue:
 
@@ -350,7 +350,7 @@ func (pq *RequestPriorityQueue) Close(err error) {
 **Design:**
 
 ```go
-// Environment variable: PRIORITY_QUEUE_TIMEOUT (default: "60s")
+// Environment variable: FAIRNESS_QUEUE_TIMEOUT (default: "60s")
 type FairnessConfig struct {
     QueueTimeout time.Duration
 }

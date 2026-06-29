@@ -20,72 +20,65 @@ kthenaRouter:
     pullPolicy: IfNotPresent
 ```
 
-#### Priority Queue Configuration
+#### Request Scheduling Configuration
 
-The router schedules requests through a per-model **priority queue**. The queue is
-strategy-agnostic: it orders requests by a priority value and admits them subject to
-capacity. The priority value is produced by a pluggable **priority strategy**:
+The router schedules requests through a per-model queue using one of two mutually
+exclusive strategies:
 
-- **User Fairness** (default): orders requests by each user's recent token usage so
+- **User Fairness**: orders requests by each user's recent token usage so
   that no single user dominates a model under contention.
 - **Session Boost**: promotes follow-up requests from recently-completed conversation
   sessions to maximize prefix cache hits for multi-turn workloads.
 
-The two strategies are mutually exclusive. Enabling the priority queue
-(`priorityQueue.enabled: true`) activates the default user-fairness strategy; setting
-`priorityQueue.sessionBoost.enabled: true` switches the queue to the session-boost
-strategy.
+The two strategies are mutually exclusive. Enable user fairness with
+`fairness.enabled: true`, or session boost with `sessionBoost.enabled: true`, but
+not both. Enabling both is a configuration error.
 
 ```yaml
 kthenaRouter:
-  priorityQueue:
-    # Enable the priority queue (default strategy: user fairness)
+  fairness:
+    # Enable user-fairness scheduling
     enabled: true
 
-    # Queue-level global total inflight limit (0 uses the router default of 16)
+    # Sliding window duration for token tracking (default: "1h")
+    # Valid formats: 1m, 5m, 10m, 30m, 1h
+    windowSize: "10m"
+    # Token weights for priority calculation
+    inputTokenWeight: 1.0
+    outputTokenWeight: 2.0
+    # Global total inflight limit admitted through the fairness gate (0 = QPS mode)
     maxConcurrent: 0
-
-    # User-fairness strategy settings (default strategy)
-    fairness:
-      # Sliding window duration for token tracking (default: "1h")
-      # Valid formats: 1m, 5m, 10m, 30m, 1h
-      windowSize: "10m"
-      # Token weights for priority calculation
-      inputTokenWeight: 1.0
-      outputTokenWeight: 2.0
 ```
 
 #### Configuration Parameters
 
-| Parameter                                               | Type    | Default          | Description                                                                 |
-| ------------------------------------------------------- | ------- | ---------------- | --------------------------------------------------------------------------- |
-| `kthenaRouter.priorityQueue.enabled`                    | boolean | `false`          | Enable the priority queue (default strategy: user fairness)                 |
-| `kthenaRouter.priorityQueue.maxConcurrent`              | int     | `0`              | Queue-level global total inflight limit (`0` uses the router default of 16) |
-| `kthenaRouter.priorityQueue.fairness.windowSize`        | string  | `"1h"`           | Fairness strategy: sliding window duration (1m-1h)                          |
-| `kthenaRouter.priorityQueue.fairness.inputTokenWeight`  | float   | `1.0`            | Fairness strategy: weight for input tokens (≥0)                             |
-| `kthenaRouter.priorityQueue.fairness.outputTokenWeight` | float   | `2.0`            | Fairness strategy: weight for output tokens (≥0)                            |
-| `kthenaRouter.priorityQueue.sessionBoost.enabled`       | boolean | `false`          | Switch the priority queue to the session-boost strategy                     |
-| `kthenaRouter.priorityQueue.sessionBoost.header`        | string  | `"X-Session-ID"` | HTTP header used to identify conversation sessions                          |
-| `kthenaRouter.priorityQueue.sessionBoost.maxSessions`   | int     | `4096`           | Max recently-completed sessions kept warm (LRU-evicted)                     |
-| `kthenaRouter.priorityQueue.sessionBoost.gracePeriod`   | string  | `"0s"`           | Wait time for a same-session follow-up (disabled by default)                |
-| `kthenaRouter.priorityQueue.sessionBoost.pollInterval`  | string  | `"100ms"`        | Interval for polling backend pod metrics                                    |
+| Parameter                                  | Type    | Default          | Description                                                        |
+| ------------------------------------------ | ------- | ---------------- | ------------------------------------------------------------------ |
+| `kthenaRouter.fairness.enabled`            | boolean | `false`          | Enable user-fairness scheduling (mutually exclusive with boost)    |
+| `kthenaRouter.fairness.windowSize`         | string  | `"1h"`           | Fairness: sliding window duration (1m-1h)                          |
+| `kthenaRouter.fairness.inputTokenWeight`   | float   | `1.0`            | Fairness: weight for input tokens (≥0)                             |
+| `kthenaRouter.fairness.outputTokenWeight`  | float   | `2.0`            | Fairness: weight for output tokens (≥0)                            |
+| `kthenaRouter.fairness.maxConcurrent`      | int     | `0`              | Fairness: global inflight limit (`0` falls back to QPS mode)       |
+| `kthenaRouter.sessionBoost.enabled`        | boolean | `false`          | Enable session-boost scheduling (mutually exclusive with fairness) |
+| `kthenaRouter.sessionBoost.header`         | string  | `"X-Session-ID"` | HTTP header used to identify conversation sessions                 |
+| `kthenaRouter.sessionBoost.maxSessions`    | int     | `4096`           | Max recently-completed sessions kept warm (LRU-evicted)            |
+| `kthenaRouter.sessionBoost.inflightPerPod` | int     | `16`             | Inflight requests per backend pod; total = perPod x pod count      |
+| `kthenaRouter.sessionBoost.gracePeriod`    | string  | `"0s"`           | Wait time for a same-session follow-up (disabled by default)       |
+| `kthenaRouter.sessionBoost.pollInterval`   | string  | `"100ms"`        | Interval for polling backend pod metrics                           |
 
 #### Session Boost Configuration
 
-Session boost is the priority queue's alternative **priority strategy** that optimizes
-multi-turn conversation latency by prioritizing follow-up requests from the same session
-(maximizing prefix cache hits). It requires `priorityQueue.enabled: true` and switches the
-queue from the default user-fairness strategy to session-aware boosting (the two strategies
-are mutually exclusive).
+Session boost optimizes multi-turn conversation latency by prioritizing follow-up
+requests from the same session (maximizing prefix cache hits). It is mutually exclusive
+with user fairness.
 
 ```yaml
 kthenaRouter:
-  priorityQueue:
-    enabled: true               # Required: session boost is a priority-queue strategy
-    sessionBoost:
-      enabled: true
-      header: "X-Session-ID"
-      maxSessions: 4096         # LRU cache of recently-completed sessions kept warm
+  sessionBoost:
+    enabled: true
+    header: "X-Session-ID"
+    maxSessions: 4096         # LRU cache of recently-completed sessions kept warm
+    inflightPerPod: 16        # total inflight = perPod x backend pod count
 ```
 
 #### Configuration Scenarios
@@ -93,34 +86,31 @@ kthenaRouter:
 ##### Development Environment
 ```yaml
 kthenaRouter:
-  priorityQueue:
+  fairness:
     enabled: true
-    fairness:
-      windowSize: "2m"          # Short window for quick feedback
-      inputTokenWeight: 1.0     # Equal weights for simplicity
-      outputTokenWeight: 1.0
+    windowSize: "2m"          # Short window for quick feedback
+    inputTokenWeight: 1.0     # Equal weights for simplicity
+    outputTokenWeight: 1.0
 ```
 
 ##### Production Environment
 ```yaml
 kthenaRouter:
-  priorityQueue:
+  fairness:
     enabled: true
-    fairness:
-      windowSize: "10m"         # Balanced window size
-      inputTokenWeight: 1.0     # Realistic cost ratios
-      outputTokenWeight: 2.5
+    windowSize: "10m"         # Balanced window size
+    inputTokenWeight: 1.0     # Realistic cost ratios
+    outputTokenWeight: 2.5
 ```
 
 ##### Cost-Sensitive Environment
 ```yaml
 kthenaRouter:
-  priorityQueue:
+  fairness:
     enabled: true
-    fairness:
-      windowSize: "30m"         # Longer window for stability
-      inputTokenWeight: 1.0     # High output weight for cost control
-      outputTokenWeight: 4.0
+    windowSize: "30m"         # Longer window for stability
+    inputTokenWeight: 1.0     # High output weight for cost control
+    outputTokenWeight: 4.0
 ```
 
 ### TLS Configuration
@@ -166,10 +156,10 @@ kthenaRouter:
 helm install kthena ./charts/kthena
 ```
 
-### With the Priority Queue (User-Fairness Strategy)
+### With User-Fairness Scheduling
 ```bash
 helm install kthena ./charts/kthena \
-  --set networking.kthenaRouter.priorityQueue.enabled=true \
-  --set networking.kthenaRouter.priorityQueue.fairness.windowSize=10m \
-  --set networking.kthenaRouter.priorityQueue.fairness.outputTokenWeight=3.0
+  --set networking.kthenaRouter.fairness.enabled=true \
+  --set networking.kthenaRouter.fairness.windowSize=10m \
+  --set networking.kthenaRouter.fairness.outputTokenWeight=3.0
 ```
