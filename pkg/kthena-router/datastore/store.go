@@ -692,8 +692,9 @@ func (s *store) makeBackendWaitingChecker(modelName string) BackendWaitingChecke
 				return true
 			}
 			podCount++
-			totalWaiting += podInfo.RequestWaitingNum
-			if podInfo.RequestWaitingNum == 0 {
+			waitingNum := podInfo.GetRequestWaitingNum()
+			totalWaiting += waitingNum
+			if waitingNum == 0 {
 				hasCapacity = true
 				return false // stop iterating, found a pod with capacity
 			}
