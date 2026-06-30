@@ -61,7 +61,7 @@ Session boost is a priority strategy of the shared per-model request priority qu
 │       │                                                                 │
 │       ▼                                                                 │
 │  ┌───────────┐    ┌──────────────────┐    ┌──────────────────────────┐  │
-│  │  Router   │───▶│ RequestPriority  │───▶│  Backend Load Balancer   │  │
+│  │  Router   │───>│ RequestPriority  │───>│  Backend Load Balancer   │  │
 │  │  Handler  │    │ Queue            │    │  (scheduler + plugins)   │  │
 │  │           │    │ (session-boost   │    │                          │  │
 │  │           │    │  mode)           │    │                          │  │
@@ -76,7 +76,7 @@ Session boost is a priority strategy of the shared per-model request priority qu
 │          Session Boost Queue Internals                   │
 │                                                          │
 │  ┌──────────────────┐     ┌─────────────────────────┐    │
-│  │ SessionTracker   │◀────│ MarkSessionRequest      │    │
+│  │ SessionTracker   │<────│ MarkSessionRequest      │    │
 │  │ (bounded LRU)    │     │ Completed()             │    │
 │  │ keys: sessionID  │     │ (after response sent)   │    │
 │  │ cap: 4096 default│     └─────────────────────────┘    │
@@ -87,8 +87,8 @@ Session boost is a priority strategy of the shared per-model request priority qu
 │  ┌──────────────────┐                                    │
 │  │  PushRequest()   │                                    │
 │  │                  │                                    │
-│  │  if recent ───▶ SessionBoost = true                   │
-│  │  else      ───▶ SessionBoost = false                  │
+│  │  if recent ───> SessionBoost = true                   │
+│  │  else      ───> SessionBoost = false                  │
 │  └────────┬─────────┘                                    │
 │            │                                             │
 │            ▼                                             │
