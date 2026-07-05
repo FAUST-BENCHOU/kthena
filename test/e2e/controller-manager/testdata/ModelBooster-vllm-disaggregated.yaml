@@ -9,8 +9,7 @@ spec:
     type: vLLMDisaggregated
     modelURI: hf://dummy-repo/dummy-model
     cacheURI: hostpath:///tmp/mock-cache
-    minReplicas: 1
-    maxReplicas: 1
+    replicas: 1
     workers:
     - type: prefill
       image: alpine:3.20
