@@ -164,6 +164,7 @@ func TestSchedulerPluginKVCacheAware(t *testing.T) {
 
 	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins.yaml")
 	model := route.Spec.ModelName
+	utils.WaitForChatModelReady(t, chatURL, model, []utils.ChatMessage{utils.NewChatMessage("user", "ready")}, 90*time.Second)
 	// Must fit sim kv-cache-size=8 blocks (block-size=8): prompt blocks + max_tokens blocks <= 8.
 	prompt := "kthena-kvcache-e2e " + strings.Repeat("cache-block-token ", 8)
 
