@@ -883,19 +883,27 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 		return
 	}
 
-	partition, _, partitionErr := c.getPartition(targetRole.RollingUpdateConfiguration, roleReplicas(targetRole))
+	partition, _, partitionErr := c.getPartition(&targetRole.RollingUpdateConfiguration, roleReplicas(targetRole))
 	if partitionErr != nil {
 		klog.Errorf("scaleDownRoles: failed to parse partition for role %s: %v", targetRole.Name, partitionErr)
 		partition = 0
 	}
 
-	// Split scores by partition (roleList is sorted by ordinal in ascending order)
+	// Split scores by partition.
+	// Align with ServingGroup semantics: partition protects ordinals in [0, partition).
 	var protectedScores []RoleWithScore
 	var nonProtectedScores []RoleWithScore
 	if partition > 0 {
-		splitIndex := min(partition, len(allScores))
-		protectedScores = allScores[:splitIndex]
-		nonProtectedScores = allScores[splitIndex:]
+		protectedScores = make([]RoleWithScore, 0, len(allScores))
+		nonProtectedScores = make([]RoleWithScore, 0, len(allScores))
+		for _, score := range allScores {
+			_, ordinal := utils.GetParentNameAndOrdinal(score.Name)
+			if ordinal < partition {
+				protectedScores = append(protectedScores, score)
+			} else {
+				nonProtectedScores = append(nonProtectedScores, score)
+			}
+		}
 	} else {
 		nonProtectedScores = allScores
 	}
@@ -959,7 +967,7 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 // When partition is set, it fills missing ordinals in [0, partition) using CurrentRevision.
 // Otherwise, it creates new Roles with increasing indices starting from the current max index + 1.
 func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int, servingGroupOrdinal int, newRevision string) {
-	partition, partitionConfigured, partitionErr := c.getPartition(targetRole.RollingUpdateConfiguration, roleReplicas(targetRole))
+	partition, partitionConfigured, partitionErr := c.getPartition(&targetRole.RollingUpdateConfiguration, roleReplicas(targetRole))
 	if partitionErr != nil {
 		klog.Errorf("scaleUpRoles: failed to parse partition for role %s: %v", targetRole.Name, partitionErr)
 	}
@@ -1107,7 +1115,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 
 	expectedCount := int(*targetRole.Replicas)
 	expectedPods := 1 + int(targetRole.WorkerReplicas)
-	partition, partitionConfigured, partitionErr := c.getPartition(targetRole.RollingUpdateConfiguration, roleReplicas(targetRole))
+	partition, partitionConfigured, partitionErr := c.getPartition(&targetRole.RollingUpdateConfiguration, roleReplicas(targetRole))
 	if partitionErr != nil {
 		klog.Errorf("manageRoleReplicasPerGroup: failed to parse partition for role %s: %v", targetRole.Name, partitionErr)
 	}
@@ -1494,17 +1502,17 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv
 		}
 
 		outdatedRoles, newUnavailable := c.outdatedRoles(ms, sg, roleSpec, roleList)
-		partition, partitionConfigured, partitionErr := c.getPartition(roleSpec.RollingUpdateConfiguration, roleReplicas(roleSpec))
+		partition, partitionConfigured, partitionErr := c.getPartition(&roleSpec.RollingUpdateConfiguration, roleReplicas(roleSpec))
 		if partitionErr != nil {
 			return nil, false, fmt.Errorf("failed to parse partition for role %s: %v", roleSpec.Name, partitionErr)
 		}
 		if partitionConfigured && partition > 0 && len(outdatedRoles) > 0 {
 			protected := make(map[string]struct{}, partition)
-			for index, role := range roleList {
-				if index >= partition {
-					break
+			for _, role := range roleList {
+				_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
+				if ordinal < partition {
+					protected[role.Name] = struct{}{}
 				}
-				protected[role.Name] = struct{}{}
 			}
 			filtered := outdatedRoles[:0]
 			for _, r := range outdatedRoles {
@@ -1518,9 +1526,10 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv
 		if len(outdatedRoles) == 0 {
 			if partitionConfigured && partition > 0 {
 				expectedHash := utils.CalRoleTemplateHash(roleSpec)
-				for index, role := range roleList {
-					if index >= partition {
-						break
+				for _, role := range roleList {
+					_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
+					if ordinal >= partition {
+						continue
 					}
 					if role.Status == datastore.RoleDeleting {
 						continue

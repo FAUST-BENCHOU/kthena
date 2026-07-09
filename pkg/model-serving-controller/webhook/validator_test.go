@@ -549,7 +549,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](4),
-					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
 						MaxUnavailable: ptr.To(intstr.FromInt(2)),
 					},
 				}}},
@@ -562,7 +562,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](4),
-					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
 						MaxUnavailable: ptr.To(intstr.FromString("0%")),
 					},
 				}}},
@@ -576,7 +576,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](4),
-					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
 						MaxUnavailable: ptr.To(intstr.FromInt(1)),
 					},
 				}}},
@@ -589,7 +589,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](4),
-					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
 						Partition: ptr.To(intstr.FromInt(1)),
 					},
 				}}},
@@ -603,7 +603,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](3),
-					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
 						MaxUnavailable: ptr.To(intstr.FromInt(4)),
 					},
 				}}},
@@ -617,7 +617,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](3),
-					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
 						MaxUnavailable: ptr.To(intstr.FromInt(3)),
 					},
 				}}},

@@ -6877,7 +6877,7 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 							{
 								Name:     "decode",
 								Replicas: ptr.To[int32](4),
-								RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
 									MaxUnavailable: tt.maxUnavailable,
 								},
 								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
@@ -6928,7 +6928,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 		return workloadv1alpha1.Role{
 			Name:     name,
 			Replicas: ptr.To(replicas),
-			RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+			RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
 				MaxUnavailable: maxUnavailable,
 			},
 			EntryTemplate: workloadv1alpha1.PodTemplateSpec{

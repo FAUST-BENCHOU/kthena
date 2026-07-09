@@ -602,13 +602,13 @@ func GetMaxUnavailable(ms *workloadv1alpha1.ModelServing) (int, error) {
 }
 
 func GetMaxUnavailableForRole(role workloadv1alpha1.Role) (int, bool, error) {
-	if role.RollingUpdateConfiguration == nil || role.RollingUpdateConfiguration.MaxUnavailable == nil {
+	if role.MaxUnavailable == nil {
 		return 0, false, nil
 	}
 	replicas := 1
 	if role.Replicas != nil {
 		replicas = int(*role.Replicas)
 	}
-	maxUnavailable, err := intstr.GetScaledValueFromIntOrPercent(role.RollingUpdateConfiguration.MaxUnavailable, replicas, false)
+	maxUnavailable, err := intstr.GetScaledValueFromIntOrPercent(role.MaxUnavailable, replicas, false)
 	return maxUnavailable, true, err
 }

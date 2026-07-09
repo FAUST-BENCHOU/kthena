@@ -2107,7 +2107,7 @@ func TestModelServingRoleRollingUpdateMaxUnavailable(t *testing.T) {
 					{
 						Name:     "prefill",
 						Replicas: &prefillReplicas,
-						RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
+						RollingUpdateConfiguration: workload.RollingUpdateConfiguration{
 							MaxUnavailable: &maxUnavailable,
 						},
 						EntryTemplate: workload.PodTemplateSpec{
@@ -2212,17 +2212,15 @@ func TestModelServingRoleRollingUpdateMaxUnavailable(t *testing.T) {
 	}
 }
 
-// TestModelServingRoleRollingUpdatePartition verifies RoleRollingUpdate respects role-level partition
-// when role ordinals do not start from 0. Partition protects the first N replicas in the sorted role list
-// (e.g. prefill-4 and prefill-5), not replicas whose ordinal is less than partition.
+// TestModelServingRoleRollingUpdatePartition verifies RoleRollingUpdate respects role-level partition.
+// Align with ServingGroup semantics: partition protects replicas whose ordinals are in [0, partition).
 func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	replicas := int32(1)
-	initialRoleReplicas := int32(8)
-	targetRoleReplicas := int32(4)
+	initialRoleReplicas := int32(4)
 	partition := int32(2)
-	protectedOrdinals := []int32{4, 5}
+	protectedOrdinals := []int32{0, 1}
 
 	modelServing := &workload.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2240,9 +2238,9 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 					{
 						Name:     "prefill",
 						Replicas: &initialRoleReplicas,
-						RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
+						RollingUpdateConfiguration: workload.RollingUpdateConfiguration{
 							Partition:      ptr.To(intstr.FromInt32(partition)),
-							MaxUnavailable: ptr.To(intstr.FromInt(int(targetRoleReplicas))),
+							MaxUnavailable: ptr.To(intstr.FromInt(int(initialRoleReplicas))),
 						},
 						EntryTemplate: workload.PodTemplateSpec{
 							Spec: corev1.PodSpec{
@@ -2266,73 +2264,13 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(initialRoleReplicas), 3*time.Minute)
 
-	initialPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
-	require.NoError(t, err)
-	require.Len(t, initialPods.Items, int(initialRoleReplicas))
-	for _, pod := range initialPods.Items {
-		roleID := pod.Labels[workload.RoleIDKey]
-		_, ordinal := controllerutils.GetParentNameAndOrdinal(roleID)
-		patchPodDeletionCost(t, ctx, kubeClient, pod.Name, ordinal*100)
-	}
-
-	scaleDownMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	scaleDownMS = scaleDownMS.DeepCopy()
-	scaleDownMS.Spec.Template.Roles[0].Replicas = &targetRoleReplicas
-	// Disable partition during scale down so deletionCost keeps high ordinals (4-7).
-	scaleDownMS.Spec.Template.Roles[0].RollingUpdateConfiguration.Partition = ptr.To(intstr.FromInt32(0))
-	t.Logf("Scaling down prefill role from %d to %d replicas with partition=0; expect ordinals 4-7 to remain", initialRoleReplicas, targetRoleReplicas)
-	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
-	require.NoError(t, err)
-	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
-	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, int(targetRoleReplicas), 3*time.Minute)
-
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
-		if err != nil || len(pods.Items) != int(targetRoleReplicas) {
-			return false
-		}
-		ordinals := make(map[int32]bool, targetRoleReplicas)
-		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
-				continue
-			}
-			roleID := pod.Labels[workload.RoleIDKey]
-			_, ordinal := controllerutils.GetParentNameAndOrdinal(roleID)
-			ordinals[int32(ordinal)] = true
-		}
-		for _, ord := range protectedOrdinals {
-			if !ordinals[ord] {
-				t.Logf("Missing prefill replica with ordinal %d after scale down", ord)
-				return false
-			}
-		}
-		return len(ordinals) == int(targetRoleReplicas)
-	}, 3*time.Minute, 2*time.Second, "prefill role ordinals should be 4-7 after scale down")
-
-	oldImageByOrdinal := map[int32]string{}
-	scaledPods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
-	require.NoError(t, err)
-	for _, pod := range scaledPods.Items {
-		if pod.DeletionTimestamp != nil || len(pod.Spec.Containers) == 0 {
-			continue
-		}
-		roleID := pod.Labels[workload.RoleIDKey]
-		_, ordinal := controllerutils.GetParentNameAndOrdinal(roleID)
-		oldImageByOrdinal[int32(ordinal)] = pod.Spec.Containers[0].Image
-	}
-	for _, ord := range protectedOrdinals {
-		require.Equal(t, nginxImage, oldImageByOrdinal[ord], "prefill-%d should use nginxImage before update", ord)
-	}
-	require.Len(t, oldImageByOrdinal, int(targetRoleReplicas))
-
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	updatedMS := initialMS.DeepCopy()
 	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
-	updatedMS.Spec.Template.Roles[0].RollingUpdateConfiguration.Partition = ptr.To(intstr.FromInt32(partition))
+	updatedMS.Spec.Template.Roles[0].Partition = ptr.To(intstr.FromInt32(partition))
 
-	t.Logf("Updating prefill role image to %s; partition=%d should keep prefill-4/5 on old image", nginxAlpineImage, partition)
+	t.Logf("Updating prefill role image to %s; partition=%d should keep prefill-0/1 on old image", nginxAlpineImage, partition)
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
 	require.NoError(t, err)
 
@@ -2342,8 +2280,8 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 			t.Logf("Failed to list prefill entry pods: %v", err)
 			return false
 		}
-		if len(pods.Items) != int(targetRoleReplicas) {
-			t.Logf("Prefill pod count=%d, expecting %d", len(pods.Items), targetRoleReplicas)
+		if len(pods.Items) != int(initialRoleReplicas) {
+			t.Logf("Prefill pod count=%d, expecting %d", len(pods.Items), initialRoleReplicas)
 			return false
 		}
 
@@ -2356,8 +2294,8 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 			_, ordinal := controllerutils.GetParentNameAndOrdinal(roleID)
 			imageByOrdinal[int32(ordinal)] = pod.Spec.Containers[0].Image
 		}
-		if len(imageByOrdinal) != int(targetRoleReplicas) {
-			t.Logf("Observed running ordinals=%d, expecting %d", len(imageByOrdinal), targetRoleReplicas)
+		if len(imageByOrdinal) != int(initialRoleReplicas) {
+			t.Logf("Observed running ordinals=%d, expecting %d", len(imageByOrdinal), initialRoleReplicas)
 			return false
 		}
 
@@ -2385,8 +2323,8 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 			}
 			updatedCorrect++
 		}
-		if updatedCorrect != int(targetRoleReplicas-partition) {
-			t.Logf("Updated replicas=%d, expecting %d; images=%v", updatedCorrect, targetRoleReplicas-partition, imageByOrdinal)
+		if updatedCorrect != int(initialRoleReplicas-partition) {
+			t.Logf("Updated replicas=%d, expecting %d; images=%v", updatedCorrect, initialRoleReplicas-partition, imageByOrdinal)
 			return false
 		}
 		return true
@@ -2421,7 +2359,7 @@ func TestModelServingRolePartitionScaleUp(t *testing.T) {
 					{
 						Name:     "prefill",
 						Replicas: ptr.To(roleReplicas),
-						RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
+						RollingUpdateConfiguration: workload.RollingUpdateConfiguration{
 							Partition:      ptr.To(intstr.FromInt32(partition)),
 							MaxUnavailable: ptr.To(intstr.FromInt(int(roleReplicas))),
 						},
@@ -2618,7 +2556,7 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 					{
 						Name:     "prefill",
 						Replicas: ptr.To(initialRoleReplicas),
-						RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
+						RollingUpdateConfiguration: workload.RollingUpdateConfiguration{
 							Partition:      ptr.To(intstr.FromInt32(partition)),
 							MaxUnavailable: ptr.To(intstr.FromInt(int(initialRoleReplicas))),
 						},
@@ -2686,11 +2624,30 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 		return true
 	}, 3*time.Minute, 2*time.Second, "Role partition state did not converge before scale down")
 
+	// Make the scale-down decision sensitive to partition:
+	// - Assign LOWER deletionCost to protected ordinals [0, partition) so they would be deleted first without partition.
+	// - Assign HIGHER deletionCost to non-protected ordinals so they would be kept without partition.
+	// With partition enabled, the controller must still delete non-protected replicas first.
+	podsBeforeScaleDown, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	require.NoError(t, err)
+	for _, pod := range podsBeforeScaleDown.Items {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		roleID := pod.Labels[workload.RoleIDKey]
+		_, ordinal := controllerutils.GetParentNameAndOrdinal(roleID)
+		if int32(ordinal) < partition {
+			patchPodDeletionCost(t, ctx, kubeClient, pod.Name, 0)
+		} else {
+			patchPodDeletionCost(t, ctx, kubeClient, pod.Name, 10000+ordinal)
+		}
+	}
+
 	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	scaleDownMS := currentMS.DeepCopy()
 	scaleDownMS.Spec.Template.Roles[0].Replicas = ptr.To(scaledRoleReplicas)
-	scaleDownMS.Spec.Template.Roles[0].RollingUpdateConfiguration.MaxUnavailable = ptr.To(intstr.FromInt(int(scaledRoleReplicas)))
+	scaleDownMS.Spec.Template.Roles[0].MaxUnavailable = ptr.To(intstr.FromInt(int(scaledRoleReplicas)))
 	t.Logf("Scaling down prefill role from %d to %d replicas while partition=%d", initialRoleReplicas, scaledRoleReplicas, partition)
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, scaleDownMS, metav1.UpdateOptions{})
 	require.NoError(t, err)

@@ -322,7 +322,7 @@ func TestGetMaxUnavailableForRole(t *testing.T) {
 			role: workloadv1alpha1.Role{
 				Name:     "decode",
 				Replicas: ptr.To[int32](4),
-				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+				RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
 					MaxUnavailable: ptr.To(intstr.FromInt(2)),
 				},
 			},
@@ -334,7 +334,7 @@ func TestGetMaxUnavailableForRole(t *testing.T) {
 			role: workloadv1alpha1.Role{
 				Name:     "decode",
 				Replicas: ptr.To[int32](5),
-				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+				RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
 					MaxUnavailable: ptr.To(intstr.FromString("50%")),
 				},
 			},
@@ -345,7 +345,7 @@ func TestGetMaxUnavailableForRole(t *testing.T) {
 			name: "nil replicas defaults to one",
 			role: workloadv1alpha1.Role{
 				Name: "decode",
-				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+				RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
 					MaxUnavailable: ptr.To(intstr.FromInt(1)),
 				},
 			},
