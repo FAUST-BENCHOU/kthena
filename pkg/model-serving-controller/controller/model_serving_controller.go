@@ -1249,11 +1249,26 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	if roleStatus == datastore.RoleDeleting {
 		return
 	}
-	err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, datastore.RoleDeleting)
+	nsn := utils.GetNamespaceName(ms)
+	err := c.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, datastore.RoleDeleting)
 	klog.V(4).Infof("Setting role %s/%s status to Deleting", ms.GetName(), roleID)
 	if err != nil {
 		klog.Errorf("failed to set role %s/%s status: %v", groupName, roleID, err)
 		return
+	}
+
+	servingGroupStatus := c.store.GetServingGroupStatus(nsn, groupName)
+	servingGroupStatusDowngraded := false
+	if servingGroupStatus == datastore.ServingGroupRunning {
+		if err := c.store.UpdateServingGroupStatus(nsn, groupName, datastore.ServingGroupScaling); err != nil {
+			klog.Errorf("failed to set ServingGroup %s status to Scaling: %v", groupName, err)
+			if rollbackErr := c.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, roleStatus); rollbackErr != nil {
+				klog.ErrorS(rollbackErr, "Failed to rollback role status", "role", roleID, "group", groupName)
+			}
+			return
+		}
+		servingGroupStatusDowngraded = true
+		klog.V(4).Infof("Setting ServingGroup %s/%s status to Scaling for role %s deletion", ms.Namespace+"/"+ms.Name, groupName, roleID)
 	}
 
 	// Emit event for role entering Deleting state.
@@ -1264,9 +1279,14 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		if deleteErr == nil {
 			return
 		}
-		rollbackErr := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, roleStatus)
+		rollbackErr := c.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, roleStatus)
 		if rollbackErr != nil {
 			klog.ErrorS(rollbackErr, "Failed to rollback role status", "role", roleID, "group", groupName)
+		}
+		if servingGroupStatusDowngraded {
+			if rollbackErr := c.store.UpdateServingGroupStatus(nsn, groupName, servingGroupStatus); rollbackErr != nil {
+				klog.ErrorS(rollbackErr, "Failed to rollback ServingGroup status", "group", groupName)
+			}
 		}
 		c.enqueueModelServing(ms)
 	}()
