@@ -474,6 +474,44 @@ func TestClose_DrainsPendingWaiters(t *testing.T) {
 	}
 }
 
+func TestClose_CancelsPendingWaiters(t *testing.T) {
+	pq := NewRequestPriorityQueue(nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := &Request{
+		ModelName:   "model-1",
+		RequestTime: time.Now(),
+		NotifyChan:  make(chan struct{}),
+		CancelCh:    ctx.Done(),
+		Cancel:      cancel,
+	}
+	if err := pq.PushRequest(req); err != nil {
+		t.Fatalf("PushRequest failed: %v", err)
+	}
+
+	pq.Close()
+
+	select {
+	case <-ctx.Done():
+		// Expected: queue shutdown cancels requests still waiting in the heap.
+	default:
+		t.Fatal("pending request was not cancelled when queue closed")
+	}
+}
+
+func TestPushRequestAfterClose(t *testing.T) {
+	pq := NewRequestPriorityQueue(nil)
+	pq.Close()
+
+	err := pq.PushRequest(&Request{ModelName: "model-1", RequestTime: time.Now()})
+	if err != errRequestQueueClosed {
+		t.Fatalf("expected %q, got %v", errRequestQueueClosed, err)
+	}
+	if pq.Len() != 0 {
+		t.Fatalf("closed queue accepted a request; length=%d", pq.Len())
+	}
+}
+
 func TestNewRequestPriorityQueueWithConfig(t *testing.T) {
 	cfg := FairnessQueueConfig{
 		MaxConcurrent:             5,
