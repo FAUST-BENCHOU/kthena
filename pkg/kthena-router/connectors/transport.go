@@ -55,7 +55,7 @@ func roundTrip(req *http.Request, timeout time.Duration) (*http.Response, error)
 		req = req.WithContext(ctx)
 	}
 
-	resp, err := http.DefaultTransport.RoundTrip(req)
+	resp, err := upstreamTransport.RoundTrip(req)
 	if err != nil {
 		cancel()
 		return nil, err
