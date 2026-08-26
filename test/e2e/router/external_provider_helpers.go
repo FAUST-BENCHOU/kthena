@@ -93,12 +93,15 @@ var (
 	}
 )
 
+// externalProviderFixture holds the three endpoints used to correlate Router
+// behavior with the mock provider and its observable metrics.
 type externalProviderFixture struct {
 	adminURL   string
 	routerURL  string
 	metricsURL string
 }
 
+// mockCapture is the credential-free projection returned by the mock admin API.
 type mockCapture struct {
 	RequestID        string          `json:"request_id"`
 	Method           string          `json:"method"`
@@ -112,12 +115,14 @@ type mockCapture struct {
 	Body             json.RawMessage `json:"body"`
 }
 
+// externalHTTPResponse preserves the raw response surfaces asserted by protocol tests.
 type externalHTTPResponse struct {
 	statusCode int
 	header     http.Header
 	body       []byte
 }
 
+// externalMetricSnapshot records the metric families changed by one routed request.
 type externalMetricSnapshot struct {
 	requests      float64
 	durationCount uint64
@@ -125,6 +130,8 @@ type externalMetricSnapshot struct {
 	outputTokens  float64
 }
 
+// externalProviderFixtureCleanup owns resources that must be released once even
+// when setup or an individual scenario fails.
 type externalProviderFixtureCleanup struct {
 	t               *testing.T
 	namespace       string
@@ -135,6 +142,8 @@ type externalProviderFixtureCleanup struct {
 	once            sync.Once
 }
 
+// setupExternalProviderFixture installs one TLS mock provider, its credentials,
+// and the routes needed to exercise both provider protocols through the Router.
 func setupExternalProviderFixture(t *testing.T, testCtx *routercontext.RouterTestContext, namespace, routerNamespace string) externalProviderFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -227,6 +236,8 @@ func setupExternalProviderFixture(t *testing.T, testCtx *routercontext.RouterTes
 	}
 }
 
+// waitForExternalRoutesReady sends one request through every route because a
+// ready provider condition does not guarantee that Router route state has converged.
 func waitForExternalRoutesReady(t *testing.T, routerURL, adminURL string) {
 	t.Helper()
 	tests := []struct {
@@ -267,6 +278,7 @@ func waitForExternalRoutesReady(t *testing.T, routerURL, adminURL string) {
 	}
 }
 
+// newExternalProvider binds one protocol and upstream model to the shared mock Service.
 func newExternalProvider(namespace, name string, providerType networkingv1alpha1.ExternalProviderType, baseURL, model, secretKey string, headers map[string]string) *networkingv1alpha1.ExternalModelProvider {
 	return &networkingv1alpha1.ExternalModelProvider{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
@@ -284,6 +296,8 @@ func newExternalProvider(namespace, name string, providerType networkingv1alpha1
 	}
 }
 
+// newExternalModelRoute creates a single-target route so destination assertions
+// cannot be affected by weighted selection.
 func newExternalModelRoute(namespace, name, model, provider string) *networkingv1alpha1.ModelRoute {
 	return &networkingv1alpha1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
@@ -299,6 +313,8 @@ func newExternalModelRoute(namespace, name, model, provider string) *networkingv
 	}
 }
 
+// waitForExternalProviderReady waits for both configuration observation and
+// credential resolution before requests are sent through the provider.
 func waitForExternalProviderReady(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, namespace, name string) {
 	t.Helper()
 	err := wait.PollUntilContextTimeout(ctx, time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
@@ -313,6 +329,8 @@ func waitForExternalProviderReady(t *testing.T, ctx context.Context, kthenaClien
 	require.NoError(t, err, "wait for ExternalModelProvider %s to become ready", name)
 }
 
+// sendJSONRequest sends one protocol request and keeps the response unparsed for
+// assertions on status, headers, JSON envelopes, and SSE data.
 func (f externalProviderFixture) sendJSONRequest(t *testing.T, path, requestID string, body []byte) externalHTTPResponse {
 	t.Helper()
 	return f.sendJSONRequestWithHeaders(t, path, requestID, body, nil)
@@ -331,6 +349,8 @@ func doExternalJSONRequest(ctx context.Context, routerURL, path, requestID strin
 	return doExternalJSONRequestWithHeaders(ctx, routerURL, path, requestID, body, nil)
 }
 
+// doExternalJSONRequestWithHeaders attaches the correlation ID used to join the
+// client response, mock capture, metrics, and Router access log.
 func doExternalJSONRequestWithHeaders(ctx context.Context, routerURL, path, requestID string, body []byte, headers http.Header) (externalHTTPResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, routerURL+path, bytes.NewReader(body))
 	if err != nil {
@@ -360,6 +380,7 @@ func doExternalJSONRequestWithHeaders(ctx context.Context, routerURL, path, requ
 	}, nil
 }
 
+// fetchMockCapture waits for the mock admin API to expose the exact upstream request.
 func fetchMockCapture(t *testing.T, adminURL, requestID string) mockCapture {
 	t.Helper()
 	var capture mockCapture
@@ -383,6 +404,7 @@ func fetchMockCapture(t *testing.T, adminURL, requestID string) mockCapture {
 	return capture
 }
 
+// deleteMockCapture prevents a reused request ID from satisfying a later scenario.
 func deleteMockCapture(t *testing.T, adminURL, requestID string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -399,6 +421,7 @@ func mockCaptureURL(adminURL, requestID string) string {
 	return strings.TrimRight(adminURL, "/") + "/__test/requests/" + url.PathEscape(requestID)
 }
 
+// readMetricSnapshot selects the destination-specific series for one scenario.
 func (f externalProviderFixture) readMetricSnapshot(t *testing.T, model, path string, statusCode int, errorType, namespace, route, provider, upstreamModel string) externalMetricSnapshot {
 	t.Helper()
 	snapshot, err := tryReadExternalMetricSnapshot(f.metricsURL, model, path, statusCode, errorType, namespace, route, provider, upstreamModel)
@@ -406,6 +429,8 @@ func (f externalProviderFixture) readMetricSnapshot(t *testing.T, model, path st
 	return snapshot
 }
 
+// tryReadExternalMetricSnapshot reads request, duration, and token families using
+// the same destination label set.
 func tryReadExternalMetricSnapshot(metricsURL, model, path string, statusCode int, errorType, namespace, route, provider, upstreamModel string) (externalMetricSnapshot, error) {
 	allMetrics, err := backendmetrics.ParseMetricsURL(metricsURL)
 	if err != nil {
@@ -440,6 +465,7 @@ func tryReadExternalMetricSnapshot(metricsURL, model, path string, statusCode in
 	}, nil
 }
 
+// readActiveGauges reads both sides of the in-flight request boundary.
 func (f externalProviderFixture) readActiveGauges(t *testing.T, model, namespace, route, provider, upstreamModel string) (downstream, upstream float64) {
 	t.Helper()
 	downstream, upstream, err := tryReadExternalActiveGauges(f.metricsURL, model, namespace, route, provider, upstreamModel)
@@ -465,6 +491,8 @@ func tryReadExternalActiveGauges(metricsURL, model, namespace, route, provider, 
 	return downstream, upstream, nil
 }
 
+// waitForExternalAccessLog polls Router pod logs because log delivery can trail
+// the response and metric updates observed by the client.
 func waitForExternalAccessLog(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace, requestID string) accesslog.AccessLogEntry {
 	t.Helper()
 	readyPods := utils.GetReadyRouterPods(t, kubeClient, kthenaNamespace)
@@ -488,6 +516,8 @@ func waitForExternalAccessLog(t *testing.T, kubeClient kubernetes.Interface, kth
 	return found
 }
 
+// findExternalAccessLog accepts both supported access-log formats through the
+// shared parser and returns only the correlated request.
 func findExternalAccessLog(logs []byte, requestID string) (accesslog.AccessLogEntry, bool) {
 	for _, line := range bytes.Split(logs, []byte{'\n'}) {
 		if entry, ok := utils.ParseRouterAccessLogLine(line); ok && entry.RequestID == requestID {
@@ -505,6 +535,8 @@ func cloneStringMap(source map[string]string) map[string]string {
 	return clone
 }
 
+// close deletes routing resources before closing port forwards and removing the
+// mock workload.
 func (c *externalProviderFixtureCleanup) close() {
 	c.once.Do(func() {
 		ctx := context.Background()

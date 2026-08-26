@@ -37,6 +37,7 @@ const (
 	maxRequestBodyBytes = 1 << 20
 )
 
+// mockConfig keeps credentials and test controls deterministic across local and CI runs.
 type mockConfig struct {
 	OpenAIKey    string
 	AnthropicKey string
@@ -44,6 +45,8 @@ type mockConfig struct {
 	MaxDelay     time.Duration
 }
 
+// capturedRequest exposes request metadata without copying credential values into
+// the admin API response.
 type capturedRequest struct {
 	RequestID        string          `json:"request_id"`
 	Method           string          `json:"method"`
@@ -57,6 +60,7 @@ type capturedRequest struct {
 	Body             json.RawMessage `json:"body"`
 }
 
+// captureStore is a bounded, concurrency-safe FIFO keyed by the E2E correlation ID.
 type captureStore struct {
 	mu    sync.RWMutex
 	max   int
@@ -74,6 +78,8 @@ func newCaptureStore(maxCaptures int) *captureStore {
 	}
 }
 
+// put refreshes an existing correlation ID as the newest item and evicts the
+// oldest item when the store reaches its bound.
 func (s *captureStore) put(capture capturedRequest) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -126,11 +132,13 @@ func (s *captureStore) delete(requestID string) bool {
 	return true
 }
 
+// mockServer serves provider traffic and test-only capture traffic on separate listeners.
 type mockServer struct {
 	config   mockConfig
 	captures *captureStore
 }
 
+// providerProtocol selects the native error envelope returned by shared controls.
 type providerProtocol int
 
 const (
@@ -138,6 +146,7 @@ const (
 	protocolAnthropic
 )
 
+// writeProviderError keeps synthetic failures faithful to the selected provider protocol.
 func writeProviderError(w http.ResponseWriter, protocol providerProtocol, status int, errorType, message string) {
 	if protocol == protocolAnthropic {
 		writeJSON(w, status, fmt.Sprintf(`{"type":"error","error":{"type":%q,"message":%q}}`, errorType, message))
@@ -156,6 +165,7 @@ func newMockServer(config mockConfig) *mockServer {
 	}
 }
 
+// providerHandler exposes only the provider endpoints that the TLS listener serves.
 func (s *mockServer) providerHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", s.handleOpenAIChat)
@@ -165,6 +175,7 @@ func (s *mockServer) providerHandler() http.Handler {
 	return mux
 }
 
+// adminHandler exposes health and captured-request state for the E2E process only.
 func (s *mockServer) adminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +190,8 @@ func (s *mockServer) adminHandler() http.Handler {
 	return mux
 }
 
+// handleOpenAIChat emits a usage-only terminal chunk so Router usage injection
+// and suppression can be observed independently from content chunks.
 func (s *mockServer) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	capture, ok := s.prepareOpenAIRequest(w, r, true)
 	if !ok {
@@ -196,6 +209,7 @@ func (s *mockServer) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, `{"id":"chat-mock","object":"chat.completion","model":"mock-openai-chat","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":5,"total_tokens":16}}`)
 }
 
+// handleOpenAICompletions mirrors the legacy response and stream shapes.
 func (s *mockServer) handleOpenAICompletions(w http.ResponseWriter, r *http.Request) {
 	capture, ok := s.prepareOpenAIRequest(w, r, true)
 	if !ok {
@@ -213,6 +227,7 @@ func (s *mockServer) handleOpenAICompletions(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, `{"id":"completion-mock","object":"text_completion","model":"mock-openai-completions","choices":[{"index":0,"text":"OK","finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}`)
 }
 
+// handleOpenAIResponses emits Responses-native usage instead of Chat usage fields.
 func (s *mockServer) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) {
 	capture, ok := s.prepareOpenAIRequest(w, r, false)
 	if !ok {
@@ -228,6 +243,8 @@ func (s *mockServer) handleOpenAIResponses(w http.ResponseWriter, r *http.Reques
 	)
 }
 
+// prepareOpenAIRequest applies the common method, credential, body, and control
+// checks before an OpenAI handler selects its response shape.
 func (s *mockServer) prepareOpenAIRequest(w http.ResponseWriter, r *http.Request, rejectNonStreamingOptions bool) (capturedRequest, bool) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -252,6 +269,8 @@ func (s *mockServer) prepareOpenAIRequest(w http.ResponseWriter, r *http.Request
 	return capture, true
 }
 
+// handleAnthropicMessages accepts both supported auth schemes and emits cache
+// token fields so the Anthropic usage parser sees the complete native shape.
 func (s *mockServer) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -284,6 +303,8 @@ func (s *mockServer) handleAnthropicMessages(w http.ResponseWriter, r *http.Requ
 	)
 }
 
+// applyControls provides bounded delay and 429 responses without adding separate
+// provider deployments for failure and in-flight gauge scenarios.
 func (s *mockServer) applyControls(w http.ResponseWriter, r *http.Request, protocol providerProtocol) bool {
 	query := r.URL.Query()
 	if status := query.Get("mock_status"); status != "" {
@@ -319,6 +340,8 @@ func isStreaming(body json.RawMessage) bool {
 	return json.Unmarshal(body, &request) == nil && request.Stream
 }
 
+// hasNonStreamingOpenAIOptions makes the mock strict enough to catch accidental
+// include_usage or stream_options injection on non-streaming requests.
 func hasNonStreamingOpenAIOptions(body json.RawMessage) bool {
 	var request map[string]any
 	if json.Unmarshal(body, &request) != nil {
@@ -332,6 +355,8 @@ func hasNonStreamingOpenAIOptions(body json.RawMessage) bool {
 	return hasIncludeUsage || hasStreamOptions
 }
 
+// captureJSONRequest accepts exactly one bounded JSON object and stores a compact
+// copy for later assertions without retaining credential values.
 func (s *mockServer) captureJSONRequest(w http.ResponseWriter, r *http.Request, authorized bool, protocol providerProtocol) (capturedRequest, bool) {
 	requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
 	if requestID == "" {
@@ -388,6 +413,7 @@ func requestAuthScheme(r *http.Request) string {
 	return ""
 }
 
+// handleCaptureAdmin lets an E2E case fetch and delete only its correlated capture.
 func (s *mockServer) handleCaptureAdmin(w http.ResponseWriter, r *http.Request) {
 	requestID, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/__test/requests/"))
 	if err != nil || strings.TrimSpace(requestID) == "" || strings.Contains(requestID, "/") {
@@ -429,6 +455,7 @@ func writeJSON(w http.ResponseWriter, status int, body string) {
 	_, _ = fmt.Fprint(w, body)
 }
 
+// writeSSE flushes each event separately so the Router exercises its streaming path.
 func writeSSE(w http.ResponseWriter, events ...string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

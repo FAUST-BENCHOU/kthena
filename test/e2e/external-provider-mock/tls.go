@@ -27,6 +27,8 @@ import (
 	"time"
 )
 
+// generateSelfSignedCertificate avoids distributing a reusable private key with
+// the mock image; each process receives an ephemeral server identity.
 func generateSelfSignedCertificate() (tls.Certificate, error) {
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

@@ -36,9 +36,9 @@ The `secretRef.key` value controls which key in the Secret is used. If the Secre
 
 ### Access control
 
-Treat `ExternalModelProvider` as an administrator API. Anyone who can create or update one can use any Secret in the same namespace and choose where the Router sends that credential. For example, a user could set `baseURL` to an HTTPS server they control and reference another Secret in the namespace.
+Only cluster administrators should be allowed to create or update `ExternalModelProvider`. The resource can read a selected key from any labeled Secret in its namespace and send that value to the HTTPS endpoint in `spec.baseURL`. A user with write access could point `spec.baseURL` to a server they control and expose the referenced credential.
 
-Do not grant tenant roles permission to create or update `ExternalModelProvider`. Limit that permission to cluster administrators. Router egress should also be restricted with NetworkPolicy or an egress proxy. Same-namespace Secret references prevent cross-namespace selection, but they do not remove this credential-forwarding risk.
+Do not grant this permission to tenant roles. Restrict Router egress with a NetworkPolicy or egress proxy. Same-namespace Secret references block cross-namespace access, but they do not prevent this credential-forwarding risk.
 
 The Router uses a label-filtered informer so unrelated Secrets are not loaded into its normal cache. Kubernetes RBAC cannot restrict `list` and `watch` by label, so the Router service account still has cluster-wide permission for those operations. The label reduces the Router's in-memory Secret footprint. It is not an authorization boundary.
 
@@ -64,7 +64,7 @@ spec:
       key: api-key
 ```
 
-The Router sends the Secret value as `Authorization: Bearer <token>` by default. Set `auth.scheme: APIKey` only when an OpenAI-compatible gateway requires `x-api-key`. If `spec.model` is set, the Router rewrites the upstream request model to that value. If `spec.model` is omitted, the original request model is preserved.
+OpenAI-compatible providers use Bearer authentication by default. The Router sends `Authorization: Bearer TOKEN`, where `TOKEN` is the value read from `auth.secretRef`. Set `auth.scheme: APIKey` only if the gateway expects the credential in `x-api-key`. If `spec.model` is set, the Router rewrites the upstream request model to that value. If `spec.model` is omitted, the original request model is preserved.
 
 For streaming Chat/Completions requests, the Router may add `stream_options.include_usage=true` upstream so it can read the provider's final usage event. Existing fields in `stream_options` are preserved. The Router does not inject `include_usage` or `stream_options` into non-streaming requests.
 

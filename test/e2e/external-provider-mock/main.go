@@ -43,6 +43,8 @@ func main() {
 	}
 }
 
+// run keeps the capture admin API on plain HTTP while exposing provider traffic
+// through a separate TLS listener, matching the Router's HTTPS-only policy.
 func run(ctx context.Context) error {
 	certificate, err := generateSelfSignedCertificate()
 	if err != nil {
@@ -96,6 +98,7 @@ func run(ctx context.Context) error {
 	return errors.Join(adminErr, providerErr)
 }
 
+// newHTTPServer bounds every mock connection so a failed E2E cannot hang cleanup.
 func newHTTPServer(handler http.Handler) *http.Server {
 	return &http.Server{
 		Handler:           handler,
@@ -106,6 +109,7 @@ func newHTTPServer(handler http.Handler) *http.Server {
 	}
 }
 
+// envOrDefault permits explicit credentials while keeping Kind runs self-contained.
 func envOrDefault(name, fallback string) string {
 	if value := os.Getenv(name); value != "" {
 		return value

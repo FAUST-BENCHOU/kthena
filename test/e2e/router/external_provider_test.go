@@ -31,6 +31,8 @@ import (
 
 const successfulExternalRequest = "successful_request"
 
+// TestExternalModelProviders verifies each request at four observable boundaries:
+// the downstream response, captured upstream request, metrics, and access log.
 func TestExternalModelProviders(t *testing.T) {
 	fixture := setupExternalProviderFixture(t, testCtx, testNamespace, kthenaNamespace)
 
@@ -48,6 +50,7 @@ func TestExternalModelProviders(t *testing.T) {
 	t.Run("ActiveGaugeLifecycle", fixture.testActiveGaugeLifecycle)
 }
 
+// testOpenAIChatNonStreaming covers tools and image content in a JSON response path.
 func (f externalProviderFixture) testOpenAIChatNonStreaming(t *testing.T) {
 	requestID := "external-chat-" + utils.RandomString(10)
 	path := "/v1/chat/completions"
@@ -86,6 +89,8 @@ func (f externalProviderFixture) testOpenAIChatNonStreaming(t *testing.T) {
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// testOpenAIChatStreaming verifies that the Router preserves existing stream options,
+// injects usage collection, and forwards the terminating OpenAI SSE event.
 func (f externalProviderFixture) testOpenAIChatStreaming(t *testing.T) {
 	requestID := "external-chat-stream-" + utils.RandomString(10)
 	path := "/v1/chat/completions"
@@ -115,6 +120,8 @@ func (f externalProviderFixture) testOpenAIChatStreaming(t *testing.T) {
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// testOpenAICompletionsNonStreaming ensures the legacy Completions path remains
+// free of streaming-only fields while still reporting provider output usage.
 func (f externalProviderFixture) testOpenAICompletionsNonStreaming(t *testing.T) {
 	requestID := "external-completions-" + utils.RandomString(10)
 	path := "/v1/completions"
@@ -144,6 +151,8 @@ func (f externalProviderFixture) testOpenAICompletionsNonStreaming(t *testing.T)
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// testOpenAICompletionsStreaming covers usage injection and SSE forwarding for
+// the legacy Completions response shape.
 func (f externalProviderFixture) testOpenAICompletionsStreaming(t *testing.T) {
 	requestID := "external-completions-stream-" + utils.RandomString(10)
 	path := "/v1/completions"
@@ -173,6 +182,7 @@ func (f externalProviderFixture) testOpenAICompletionsStreaming(t *testing.T) {
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// testOpenAIResponsesNonStreaming exercises the Responses-specific JSON and usage shape.
 func (f externalProviderFixture) testOpenAIResponsesNonStreaming(t *testing.T) {
 	requestID := "external-responses-json-" + utils.RandomString(10)
 	path := "/v1/responses"
@@ -201,6 +211,8 @@ func (f externalProviderFixture) testOpenAIResponsesNonStreaming(t *testing.T) {
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// testOpenAIResponsesStreaming verifies that Responses inputs unknown to Chat
+// Completions survive forwarding and that the terminal event supplies usage.
 func (f externalProviderFixture) testOpenAIResponsesStreaming(t *testing.T) {
 	requestID := "external-responses-" + utils.RandomString(10)
 	path := "/v1/responses"
@@ -237,6 +249,8 @@ func (f externalProviderFixture) testOpenAIResponsesStreaming(t *testing.T) {
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// testAnthropicNonStreaming covers the default x-api-key authentication path and
+// the Anthropic JSON response shape.
 func (f externalProviderFixture) testAnthropicNonStreaming(t *testing.T) {
 	requestID := "external-anthropic-json-" + utils.RandomString(10)
 	path := "/v1/messages"
@@ -267,6 +281,8 @@ func (f externalProviderFixture) testAnthropicNonStreaming(t *testing.T) {
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// testAnthropicBearerGateway proves that an Anthropic-compatible gateway can
+// override authentication while retaining client-supplied beta headers.
 func (f externalProviderFixture) testAnthropicBearerGateway(t *testing.T) {
 	requestID := "external-anthropic-bearer-" + utils.RandomString(10)
 	path := "/v1/messages"
@@ -295,6 +311,8 @@ func (f externalProviderFixture) testAnthropicBearerGateway(t *testing.T) {
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// testAnthropicStreaming covers tool, image, and document blocks together with
+// the complete Anthropic Messages SSE lifecycle.
 func (f externalProviderFixture) testAnthropicStreaming(t *testing.T) {
 	requestID := "external-anthropic-" + utils.RandomString(10)
 	path := "/v1/messages"
@@ -331,6 +349,8 @@ func (f externalProviderFixture) testAnthropicStreaming(t *testing.T) {
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// testNonTextInputAccounting fixes the accounting boundary: non-text input is
+// forwarded but excluded from the Router's local input-token estimate.
 func (f externalProviderFixture) testNonTextInputAccounting(t *testing.T) {
 	requestID := "external-image-only-" + utils.RandomString(10)
 	path := "/v1/chat/completions"
@@ -366,6 +386,8 @@ func (f externalProviderFixture) testNonTextInputAccounting(t *testing.T) {
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// testUpstream429 verifies that a provider rejection reaches the client unchanged
+// and is attributed to the upstream without recording output tokens.
 func (f externalProviderFixture) testUpstream429(t *testing.T) {
 	requestID := "external-429-" + utils.RandomString(10)
 	path := "/v1/chat/completions"
@@ -398,6 +420,8 @@ func (f externalProviderFixture) testUpstream429(t *testing.T) {
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// testActiveGaugeLifecycle holds an upstream request open long enough to observe
+// both active gauges, then verifies that they return to their baselines.
 func (f externalProviderFixture) testActiveGaugeLifecycle(t *testing.T) {
 	requestID := "external-active-" + utils.RandomString(10)
 	path := "/v1/chat/completions"
@@ -451,6 +475,8 @@ func (f externalProviderFixture) testActiveGaugeLifecycle(t *testing.T) {
 	deleteMockCapture(t, f.adminURL, requestID)
 }
 
+// assertExternalCapture checks normalized request metadata and the protocol-specific
+// authentication and version headers added by the Router.
 func assertExternalCapture(t *testing.T, capture mockCapture, path string, anthropic bool) {
 	t.Helper()
 	assert.Equal(t, http.MethodPost, capture.Method)
@@ -464,6 +490,8 @@ func assertExternalCapture(t *testing.T, capture mockCapture, path string, anthr
 	}
 }
 
+// assertPositiveExternalInputAccounting keeps the metric and access-log views of
+// the Router's local input estimate in sync.
 func assertPositiveExternalInputAccounting(t *testing.T, before, after externalMetricSnapshot, entry accesslog.AccessLogEntry) {
 	t.Helper()
 	delta := after.inputTokens - before.inputTokens
@@ -471,6 +499,8 @@ func assertPositiveExternalInputAccounting(t *testing.T, before, after externalM
 	assert.Equal(t, delta, float64(entry.InputTokens), "metric and access log must use the same local input-token estimate")
 }
 
+// assertRewrittenExternalPayload permits only the documented model rewrite and,
+// when requested, the OpenAI stream usage option added by the Router.
 func assertRewrittenExternalPayload(t *testing.T, original, captured []byte, upstreamModel string, expectStreamUsageInjection bool) {
 	t.Helper()
 	var want, got map[string]any
@@ -495,6 +525,8 @@ func assertRewrittenExternalPayload(t *testing.T, original, captured []byte, ups
 	assert.Equal(t, want, got, "opaque non-model payload fields must be preserved")
 }
 
+// waitForMetricDelta waits for every metric family affected by one request so a
+// later scenario cannot accidentally satisfy an earlier assertion.
 func (f externalProviderFixture) waitForMetricDelta(t *testing.T, before externalMetricSnapshot, model, path string, statusCode int, errorType, route, provider, upstreamModel string, outputTokens float64) externalMetricSnapshot {
 	t.Helper()
 	var after externalMetricSnapshot
@@ -511,6 +543,8 @@ func (f externalProviderFixture) waitForMetricDelta(t *testing.T, before externa
 	return after
 }
 
+// assertSuccessfulExternalAccessLog checks the destination identity and provider
+// attempt data emitted for a successful request.
 func assertSuccessfulExternalAccessLog(t *testing.T, entry accesslog.AccessLogEntry, model, path, route, provider, upstreamModel string, outputTokens int) {
 	t.Helper()
 	assert.Equal(t, http.MethodPost, entry.Method)
