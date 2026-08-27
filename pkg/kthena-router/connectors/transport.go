@@ -19,11 +19,13 @@ package connectors
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
@@ -31,8 +33,41 @@ import (
 	"k8s.io/klog/v2"
 )
 
-func prefillerProxy(_ *gin.Context, req *http.Request) error {
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnClose) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
+
+func roundTrip(req *http.Request, timeout time.Duration) (*http.Response, error) {
+	// Stop the timeout after response headers so long-running streams can finish.
+	cancel := context.CancelFunc(func() {})
+	if timeout > 0 {
+		var ctx context.Context
+		ctx, cancel = context.WithCancel(req.Context())
+		timer := time.AfterFunc(timeout, cancel)
+		defer timer.Stop()
+		req = req.WithContext(ctx)
+	}
+
 	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if timeout > 0 {
+		resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
+	}
+	return resp, nil
+}
+
+func prefillerProxy(_ *gin.Context, req *http.Request, timeout time.Duration) error {
+	resp, err := roundTrip(req, timeout)
 	if err != nil {
 		return fmt.Errorf("prefill request failed: %w", err)
 	}
@@ -46,8 +81,8 @@ func prefillerProxy(_ *gin.Context, req *http.Request) error {
 	return nil
 }
 
-func decoderProxy(c *gin.Context, req *http.Request) (int, error) {
-	resp, err := http.DefaultTransport.RoundTrip(req)
+func decoderProxy(c *gin.Context, req *http.Request, timeout time.Duration) (int, error) {
+	resp, err := roundTrip(req, timeout)
 	if err != nil {
 		return 0, fmt.Errorf("decode request failed: %w", err)
 	}

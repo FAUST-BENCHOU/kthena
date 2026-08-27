@@ -18,12 +18,14 @@ package connectors
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"k8s.io/klog/v2"
@@ -51,7 +53,7 @@ func (n *NIXLConnector) Name() string {
 }
 
 // Proxy executes the complete prefill-decode flow using NIXL for high-performance KV transfer
-func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *OnFlightHooks) (int, error) {
+func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, timeout time.Duration, hooks *OnFlightHooks) (int, error) {
 	// Get metrics recorder from context
 	var metricsRecorder *metrics.RequestMetricsRecorder
 	if recorder, exists := c.Get("metricsRecorder"); exists {
@@ -76,7 +78,7 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	}
 
 	// 1. send prefill request
-	kvTransferParams, err := n.prefill(n.prefillRequest, prefillAddr)
+	kvTransferParams, err := n.prefill(n.prefillRequest, prefillAddr, timeout)
 
 	if hooks != nil && hooks.DecrPrefill != nil {
 		hooks.DecrPrefill()
@@ -105,7 +107,7 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 
 	// 2. send decode request
 	decodeReq := n.buildDecodeRequest(c, n.decodeRequestBody, kvTransferParams)
-	result, decodeErr := n.decode(c, decodeReq, decodeAddr)
+	result, decodeErr := n.decode(c, decodeReq, decodeAddr, timeout)
 
 	if hooks != nil && hooks.DecrDecode != nil {
 		hooks.DecrDecode()
@@ -123,12 +125,18 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 }
 
 // prefill send prefill request, returns kv_transfer_params
-func (n *NIXLConnector) prefill(req *http.Request, prefillAddr string) (interface{}, error) {
+func (n *NIXLConnector) prefill(req *http.Request, prefillAddr string, timeout time.Duration) (interface{}, error) {
 	req.URL.Host = prefillAddr
 	req.URL.Scheme = "http"
 	klog.V(4).Infof("%s prefill: sending to %s", n.name, req.URL.String())
 
-	// Send prefill request
+	// NIXL returns connector setup metadata in the response body, so the timeout
+	// covers the body read. Decode response bodies remain unbounded.
+	if timeout > 0 {
+		ctx, cancel := context.WithTimeout(req.Context(), timeout)
+		defer cancel()
+		req = req.WithContext(ctx)
+	}
 	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
 		return nil, err
@@ -172,7 +180,7 @@ func (n *NIXLConnector) buildDecodeRequest(c *gin.Context, reqBody map[string]in
 }
 
 // decode send decode request with streaming response
-func (n *NIXLConnector) decode(c *gin.Context, req *http.Request, decodeAddr string) (int, error) {
+func (n *NIXLConnector) decode(c *gin.Context, req *http.Request, decodeAddr string, timeout time.Duration) (int, error) {
 	// Set kv_transfer_params from prefill response
 	req.URL.Host = decodeAddr
 	req.URL.Scheme = "http"
@@ -180,7 +188,7 @@ func (n *NIXLConnector) decode(c *gin.Context, req *http.Request, decodeAddr str
 	klog.V(4).Infof("%s decode: sending to %s", n.name, req.URL.String())
 
 	// Use decoderProxy to handle the decode response with proper streaming
-	return decoderProxy(c, req)
+	return decoderProxy(c, req, timeout)
 }
 
 func cloneReqBody(reqBody map[string]interface{}) map[string]interface{} {
