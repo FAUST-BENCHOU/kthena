@@ -76,6 +76,11 @@ const (
 	externalOpenAIChatUpstreamModel = "mock-openai-chat"
 	externalResponsesUpstreamModel  = "mock-responses"
 	externalAnthropicUpstreamModel  = "mock-anthropic"
+
+	externalOpenAIChatPath        = "/v1/chat/completions"
+	externalOpenAICompletionsPath = "/v1/completions"
+	externalOpenAIResponsesPath   = "/v1/responses"
+	externalAnthropicMessagesPath = "/v1/messages"
 )
 
 var (
@@ -120,6 +125,27 @@ type externalHTTPResponse struct {
 	statusCode int
 	header     http.Header
 	body       []byte
+}
+
+// externalTestRequest describes only the caller-controlled request surfaces.
+// The fixture owns JSON encoding, correlation IDs, transport, and mock capture.
+type externalTestRequest struct {
+	path    string
+	model   string
+	query   url.Values
+	headers http.Header
+	payload json.RawMessage
+}
+
+// externalExchange joins the raw downstream response with the exact request
+// observed by the mock provider.
+type externalExchange struct {
+	requestID   string
+	requestBody []byte
+	target      string
+	headers     http.Header
+	response    externalHTTPResponse
+	adminURL    string
 }
 
 // externalMetricSnapshot records the metric families changed by one routed request.
@@ -248,37 +274,33 @@ func setupExternalProviderFixture(t *testing.T, testCtx *routercontext.RouterTes
 func waitForExternalRoutesReady(t *testing.T, routerURL, adminURL string) {
 	t.Helper()
 	tests := []struct {
-		name string
-		path string
-		body []byte
+		name    string
+		request externalTestRequest
 	}{
 		{
-			name: "chat",
-			path: "/v1/chat/completions",
-			body: []byte(`{"model":"` + externalOpenAIChatModel + `","messages":[{"role":"user","content":"route ready"}],"stream":false}`),
+			name:    "chat",
+			request: openAIChatRequest(externalOpenAIChatModel, `{"messages":[{"role":"user","content":"route ready"}],"stream":false}`),
 		},
 		{
-			name: "responses",
-			path: "/v1/responses",
-			body: []byte(`{"model":"` + externalResponsesModel + `","input":"route ready","stream":false}`),
+			name:    "responses",
+			request: openAIResponsesRequest(externalResponsesModel, `{"input":"route ready","stream":false}`),
 		},
 		{
-			name: "anthropic",
-			path: "/v1/messages",
-			body: []byte(`{"model":"` + externalAnthropicModel + `","max_tokens":8,"messages":[{"role":"user","content":"route ready"}],"stream":false}`),
+			name:    "anthropic",
+			request: anthropicMessagesRequest(externalAnthropicModel, `{"max_tokens":8,"messages":[{"role":"user","content":"route ready"}],"stream":false}`),
 		},
 		{
-			name: "anthropic-bearer",
-			path: "/v1/messages",
-			body: []byte(`{"model":"` + externalAnthropicBearerModel + `","max_tokens":8,"messages":[{"role":"user","content":"route ready"}],"stream":false}`),
+			name:    "anthropic-bearer",
+			request: anthropicMessagesRequest(externalAnthropicBearerModel, `{"max_tokens":8,"messages":[{"role":"user","content":"route ready"}],"stream":false}`),
 		},
 	}
 	for _, tt := range tests {
 		requestID := "external-route-ready-" + tt.name + "-" + utils.RandomString(10)
+		body := tt.request.body(t)
 		require.Eventually(t, func() bool {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			response, err := doExternalJSONRequest(ctx, routerURL, tt.path, requestID, tt.body)
+			response, err := doExternalJSONRequest(ctx, routerURL, tt.request.path, requestID, body)
 			return err == nil && response.statusCode == http.StatusOK
 		}, 30*time.Second, 250*time.Millisecond, "ModelRoute for %s was not programmed by the Router", tt.name)
 		deleteMockCapture(t, adminURL, requestID)
@@ -336,20 +358,84 @@ func waitForExternalProviderReady(t *testing.T, ctx context.Context, kthenaClien
 	require.NoError(t, err, "wait for ExternalModelProvider %s to become ready", name)
 }
 
-// sendJSONRequest sends one protocol request and keeps the response unparsed for
-// assertions on status, headers, JSON envelopes, and SSE data.
-func (f externalProviderFixture) sendJSONRequest(t *testing.T, path, requestID string, body []byte) externalHTTPResponse {
-	t.Helper()
-	return f.sendJSONRequestWithHeaders(t, path, requestID, body, nil)
+// These constructors select the protocol endpoint while leaving every payload
+// field visible in the calling test.
+func openAIChatRequest(model, payload string) externalTestRequest {
+	return externalTestRequest{path: externalOpenAIChatPath, model: model, payload: json.RawMessage(payload)}
 }
 
-func (f externalProviderFixture) sendJSONRequestWithHeaders(t *testing.T, path, requestID string, body []byte, headers http.Header) externalHTTPResponse {
+func openAICompletionsRequest(model, payload string) externalTestRequest {
+	return externalTestRequest{path: externalOpenAICompletionsPath, model: model, payload: json.RawMessage(payload)}
+}
+
+func openAIResponsesRequest(model, payload string) externalTestRequest {
+	return externalTestRequest{path: externalOpenAIResponsesPath, model: model, payload: json.RawMessage(payload)}
+}
+
+func anthropicMessagesRequest(model, payload string) externalTestRequest {
+	return externalTestRequest{path: externalAnthropicMessagesPath, model: model, payload: json.RawMessage(payload)}
+}
+
+// roundTrip sends one raw protocol request and returns its correlated response state.
+func (f externalProviderFixture) roundTrip(t *testing.T, request externalTestRequest) externalExchange {
 	t.Helper()
+	exchange := f.prepareRequest(t, request)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	response, err := doExternalJSONRequestWithHeaders(ctx, f.routerURL, path, requestID, body, headers)
+	response, err := exchange.send(ctx, f.routerURL)
 	require.NoError(t, err, "send external provider request")
-	return response
+	exchange.response = response
+	return exchange
+}
+
+func (f externalProviderFixture) prepareRequest(t *testing.T, request externalTestRequest) externalExchange {
+	t.Helper()
+	requestID := "external-test-" + utils.RandomString(10)
+	requestBody := request.body(t)
+	t.Cleanup(func() {
+		deleteMockCapture(t, f.adminURL, requestID)
+	})
+	return externalExchange{
+		requestID:   requestID,
+		requestBody: requestBody,
+		target:      request.target(),
+		headers:     request.headers,
+		adminURL:    f.adminURL,
+	}
+}
+
+func (e externalExchange) send(ctx context.Context, routerURL string) (externalHTTPResponse, error) {
+	return doExternalJSONRequestWithHeaders(ctx, routerURL, e.target, e.requestID, e.requestBody, e.headers)
+}
+
+// capture is intentionally lazy so response assertions fail before the test
+// waits for an upstream capture when the Router rejected a request locally.
+func (e externalExchange) capture(t *testing.T) mockCapture {
+	t.Helper()
+	return fetchMockCapture(t, e.adminURL, e.requestID)
+}
+
+func (r externalTestRequest) target() string {
+	if len(r.query) == 0 {
+		return r.path
+	}
+	return r.path + "?" + r.query.Encode()
+}
+
+// body validates the protocol payload as one JSON object and injects the routed
+// model without string concatenation. The Router may then rewrite only this field.
+func (r externalTestRequest) body(t *testing.T) []byte {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(r.payload, &fields), "decode external provider test request")
+	require.NotNil(t, fields, "external provider test request must be a JSON object")
+	require.NotContains(t, fields, "model", "protocol payload must not set model directly")
+	model, err := json.Marshal(r.model)
+	require.NoError(t, err, "marshal external provider test model")
+	fields["model"] = model
+	body, err := json.Marshal(fields)
+	require.NoError(t, err, "encode external provider test request")
+	return body
 }
 
 func doExternalJSONRequest(ctx context.Context, routerURL, path, requestID string, body []byte) (externalHTTPResponse, error) {

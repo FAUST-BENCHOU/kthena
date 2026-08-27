@@ -20,13 +20,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
-	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
 
 const successfulExternalRequest = "successful_request"
@@ -52,10 +52,9 @@ func TestExternalModelProviders(t *testing.T) {
 
 // testOpenAIChatNonStreaming covers tools and image content in a JSON response path.
 func (f externalProviderFixture) testOpenAIChatNonStreaming(t *testing.T) {
-	requestID := "external-chat-" + utils.RandomString(10)
-	path := "/v1/chat/completions"
-	body := []byte(`{
-		"model":"` + externalOpenAIChatModel + `",
+	path := externalOpenAIChatPath
+	before := f.readMetricSnapshot(t, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
+	exchange := f.roundTrip(t, openAIChatRequest(externalOpenAIChatModel, `{
 		"messages":[
 			{"role":"user","content":[
 				{"type":"text","text":"Use the image and tool."},
@@ -68,156 +67,136 @@ func (f externalProviderFixture) testOpenAIChatNonStreaming(t *testing.T) {
 		"tool_choice":"auto",
 		"stream":false,
 		"max_tokens":16
-	}`)
-
-	before := f.readMetricSnapshot(t, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
-	response := f.sendJSONRequest(t, path, requestID, body)
+	}`))
+	response := exchange.response
 	require.Equal(t, http.StatusOK, response.statusCode, "response: %s", response.body)
 	assert.Equal(t, "application/json", response.header.Get("Content-Type"))
 	var responseObject map[string]any
 	require.NoError(t, json.Unmarshal(response.body, &responseObject))
 	assert.Equal(t, "chat-mock", responseObject["id"])
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, false)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, false)
+	assertRewrittenExternalPayload(t, exchange.requestBody, capture.Body, externalOpenAIChatUpstreamModel, false)
 
 	after := f.waitForMetricDelta(t, before, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 5)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalOpenAIChatModel, path, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 5)
 	assertPositiveExternalInputAccounting(t, before, after, entry)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // testOpenAIChatStreaming verifies that the Router preserves existing stream options,
 // injects usage collection, and forwards the terminating OpenAI SSE event.
 func (f externalProviderFixture) testOpenAIChatStreaming(t *testing.T) {
-	requestID := "external-chat-stream-" + utils.RandomString(10)
-	path := "/v1/chat/completions"
-	body := []byte(`{
-		"model":"` + externalOpenAIChatModel + `",
+	path := externalOpenAIChatPath
+	before := f.readMetricSnapshot(t, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
+	exchange := f.roundTrip(t, openAIChatRequest(externalOpenAIChatModel, `{
 		"messages":[{"role":"user","content":"Stream a short answer."}],
 		"stream":true,
 		"stream_options":{"vendor_option":"preserve-me"},
 		"max_tokens":16
-	}`)
-
-	before := f.readMetricSnapshot(t, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
-	response := f.sendJSONRequest(t, path, requestID, body)
+	}`))
+	response := exchange.response
 	require.Equal(t, http.StatusOK, response.statusCode, "response: %s", response.body)
 	assert.Contains(t, response.header.Get("Content-Type"), "text/event-stream")
 	assert.Contains(t, string(response.body), `"object":"chat.completion.chunk"`)
 	assert.Contains(t, string(response.body), `data: [DONE]`)
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, false)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, true)
+	assertRewrittenExternalPayload(t, exchange.requestBody, capture.Body, externalOpenAIChatUpstreamModel, true)
 
 	after := f.waitForMetricDelta(t, before, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 5)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalOpenAIChatModel, path, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 5)
 	assertPositiveExternalInputAccounting(t, before, after, entry)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // testOpenAICompletionsNonStreaming ensures the legacy Completions path remains
 // free of streaming-only fields while still reporting provider output usage.
 func (f externalProviderFixture) testOpenAICompletionsNonStreaming(t *testing.T) {
-	requestID := "external-completions-" + utils.RandomString(10)
-	path := "/v1/completions"
-	body := []byte(`{
-		"model":"` + externalOpenAIChatModel + `",
+	path := externalOpenAICompletionsPath
+	before := f.readMetricSnapshot(t, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
+	exchange := f.roundTrip(t, openAICompletionsRequest(externalOpenAIChatModel, `{
 		"prompt":"Complete this sentence.",
 		"stream":false,
 		"max_tokens":16
-	}`)
-
-	before := f.readMetricSnapshot(t, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
-	response := f.sendJSONRequest(t, path, requestID, body)
+	}`))
+	response := exchange.response
 	require.Equal(t, http.StatusOK, response.statusCode, "response: %s", response.body)
 	assert.Equal(t, "application/json", response.header.Get("Content-Type"))
 	var responseObject map[string]any
 	require.NoError(t, json.Unmarshal(response.body, &responseObject))
 	assert.Equal(t, "completion-mock", responseObject["id"])
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, false)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, false)
+	assertRewrittenExternalPayload(t, exchange.requestBody, capture.Body, externalOpenAIChatUpstreamModel, false)
 
 	after := f.waitForMetricDelta(t, before, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 3)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalOpenAIChatModel, path, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 3)
 	assertPositiveExternalInputAccounting(t, before, after, entry)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // testOpenAICompletionsStreaming covers usage injection and SSE forwarding for
 // the legacy Completions response shape.
 func (f externalProviderFixture) testOpenAICompletionsStreaming(t *testing.T) {
-	requestID := "external-completions-stream-" + utils.RandomString(10)
-	path := "/v1/completions"
-	body := []byte(`{
-		"model":"` + externalOpenAIChatModel + `",
+	path := externalOpenAICompletionsPath
+	before := f.readMetricSnapshot(t, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
+	exchange := f.roundTrip(t, openAICompletionsRequest(externalOpenAIChatModel, `{
 		"prompt":"Complete this sentence.",
 		"stream":true,
 		"stream_options":{"vendor_option":"preserve-me"},
 		"max_tokens":16
-	}`)
-
-	before := f.readMetricSnapshot(t, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
-	response := f.sendJSONRequest(t, path, requestID, body)
+	}`))
+	response := exchange.response
 	require.Equal(t, http.StatusOK, response.statusCode, "response: %s", response.body)
 	assert.Contains(t, response.header.Get("Content-Type"), "text/event-stream")
 	assert.Contains(t, string(response.body), `"object":"text_completion"`)
 	assert.Contains(t, string(response.body), `data: [DONE]`)
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, false)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, true)
+	assertRewrittenExternalPayload(t, exchange.requestBody, capture.Body, externalOpenAIChatUpstreamModel, true)
 
 	after := f.waitForMetricDelta(t, before, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 3)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalOpenAIChatModel, path, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 3)
 	assertPositiveExternalInputAccounting(t, before, after, entry)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // testOpenAIResponsesNonStreaming exercises the Responses-specific JSON and usage shape.
 func (f externalProviderFixture) testOpenAIResponsesNonStreaming(t *testing.T) {
-	requestID := "external-responses-json-" + utils.RandomString(10)
-	path := "/v1/responses"
-	body := []byte(`{
-		"model":"` + externalResponsesModel + `",
+	path := externalOpenAIResponsesPath
+	before := f.readMetricSnapshot(t, externalResponsesModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalResponsesRouteName, externalResponsesProviderName, externalResponsesUpstreamModel)
+	exchange := f.roundTrip(t, openAIResponsesRequest(externalResponsesModel, `{
 		"input":"Return a short JSON response.",
 		"stream":false
-	}`)
-
-	before := f.readMetricSnapshot(t, externalResponsesModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalResponsesRouteName, externalResponsesProviderName, externalResponsesUpstreamModel)
-	response := f.sendJSONRequest(t, path, requestID, body)
+	}`))
+	response := exchange.response
 	require.Equal(t, http.StatusOK, response.statusCode, "response: %s", response.body)
 	assert.Equal(t, "application/json", response.header.Get("Content-Type"))
 	var responseObject map[string]any
 	require.NoError(t, json.Unmarshal(response.body, &responseObject))
 	assert.Equal(t, "resp-mock", responseObject["id"])
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, false)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalResponsesUpstreamModel, false)
+	assertRewrittenExternalPayload(t, exchange.requestBody, capture.Body, externalResponsesUpstreamModel, false)
 
 	after := f.waitForMetricDelta(t, before, externalResponsesModel, path, http.StatusOK, successfulExternalRequest, externalResponsesRouteName, externalResponsesProviderName, externalResponsesUpstreamModel, 4)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalResponsesModel, path, externalResponsesRouteName, externalResponsesProviderName, externalResponsesUpstreamModel, 4)
 	assertPositiveExternalInputAccounting(t, before, after, entry)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // testOpenAIResponsesStreaming verifies that Responses inputs unknown to Chat
 // Completions survive forwarding and that the terminal event supplies usage.
 func (f externalProviderFixture) testOpenAIResponsesStreaming(t *testing.T) {
-	requestID := "external-responses-" + utils.RandomString(10)
-	path := "/v1/responses"
-	body := []byte(`{
-		"model":"` + externalResponsesModel + `",
+	path := externalOpenAIResponsesPath
+	before := f.readMetricSnapshot(t, externalResponsesModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalResponsesRouteName, externalResponsesProviderName, externalResponsesUpstreamModel)
+	exchange := f.roundTrip(t, openAIResponsesRequest(externalResponsesModel, `{
 		"stream":true,
 		"input":[
 			{"type":"message","role":"user","content":[
@@ -230,94 +209,85 @@ func (f externalProviderFixture) testOpenAIResponsesStreaming(t *testing.T) {
 			{"type":"custom_tool_call_output","call_id":"custom-call","output":"ok"}
 		],
 		"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]
-	}`)
-
-	before := f.readMetricSnapshot(t, externalResponsesModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalResponsesRouteName, externalResponsesProviderName, externalResponsesUpstreamModel)
-	response := f.sendJSONRequest(t, path, requestID, body)
+	}`))
+	response := exchange.response
 	require.Equal(t, http.StatusOK, response.statusCode, "response: %s", response.body)
 	assert.Contains(t, response.header.Get("Content-Type"), "text/event-stream")
 	assert.Contains(t, string(response.body), `"type":"response.completed"`)
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, false)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalResponsesUpstreamModel, false)
+	assertRewrittenExternalPayload(t, exchange.requestBody, capture.Body, externalResponsesUpstreamModel, false)
 
 	after := f.waitForMetricDelta(t, before, externalResponsesModel, path, http.StatusOK, successfulExternalRequest, externalResponsesRouteName, externalResponsesProviderName, externalResponsesUpstreamModel, 4)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalResponsesModel, path, externalResponsesRouteName, externalResponsesProviderName, externalResponsesUpstreamModel, 4)
 	assertPositiveExternalInputAccounting(t, before, after, entry)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // testAnthropicNonStreaming covers the default x-api-key authentication path and
 // the Anthropic JSON response shape.
 func (f externalProviderFixture) testAnthropicNonStreaming(t *testing.T) {
-	requestID := "external-anthropic-json-" + utils.RandomString(10)
-	path := "/v1/messages"
-	body := []byte(`{
-		"model":"` + externalAnthropicModel + `",
+	path := externalAnthropicMessagesPath
+	before := f.readMetricSnapshot(t, externalAnthropicModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalAnthropicRouteName, externalAnthropicProviderName, externalAnthropicUpstreamModel)
+	exchange := f.roundTrip(t, anthropicMessagesRequest(externalAnthropicModel, `{
 		"max_tokens":16,
 		"stream":false,
 		"messages":[{"role":"user","content":"Return a short JSON response."}]
-	}`)
-
-	before := f.readMetricSnapshot(t, externalAnthropicModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalAnthropicRouteName, externalAnthropicProviderName, externalAnthropicUpstreamModel)
-	response := f.sendJSONRequest(t, path, requestID, body)
+	}`))
+	response := exchange.response
 	require.Equal(t, http.StatusOK, response.statusCode, "response: %s", response.body)
 	assert.Equal(t, "application/json", response.header.Get("Content-Type"))
 	var responseObject map[string]any
 	require.NoError(t, json.Unmarshal(response.body, &responseObject))
 	assert.Equal(t, "msg-mock", responseObject["id"])
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, true)
 	assert.Equal(t, "APIKey", capture.AuthScheme)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalAnthropicUpstreamModel, false)
+	assertRewrittenExternalPayload(t, exchange.requestBody, capture.Body, externalAnthropicUpstreamModel, false)
 
 	after := f.waitForMetricDelta(t, before, externalAnthropicModel, path, http.StatusOK, successfulExternalRequest, externalAnthropicRouteName, externalAnthropicProviderName, externalAnthropicUpstreamModel, 6)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalAnthropicModel, path, externalAnthropicRouteName, externalAnthropicProviderName, externalAnthropicUpstreamModel, 6)
 	assertPositiveExternalInputAccounting(t, before, after, entry)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // testAnthropicBearerGateway proves that an Anthropic-compatible gateway can
 // override authentication while retaining client-supplied beta headers.
 func (f externalProviderFixture) testAnthropicBearerGateway(t *testing.T) {
-	requestID := "external-anthropic-bearer-" + utils.RandomString(10)
-	path := "/v1/messages"
-	body := []byte(`{
-		"model":"` + externalAnthropicBearerModel + `",
+	path := externalAnthropicMessagesPath
+	beta := "context-1m-2025-08-07"
+
+	before := f.readMetricSnapshot(t, externalAnthropicBearerModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalAnthropicBearerRouteName, externalAnthropicBearerProviderName, externalAnthropicUpstreamModel)
+	request := anthropicMessagesRequest(externalAnthropicBearerModel, `{
 		"max_tokens":16,
 		"stream":false,
 		"messages":[{"role":"user","content":"Reply with OK."}]
 	}`)
-	beta := "context-1m-2025-08-07"
-
-	before := f.readMetricSnapshot(t, externalAnthropicBearerModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalAnthropicBearerRouteName, externalAnthropicBearerProviderName, externalAnthropicUpstreamModel)
-	response := f.sendJSONRequestWithHeaders(t, path, requestID, body, http.Header{"Anthropic-Beta": []string{beta}})
+	request.headers = http.Header{"Anthropic-Beta": []string{beta}}
+	exchange := f.roundTrip(t, request)
+	response := exchange.response
 	require.Equal(t, http.StatusOK, response.statusCode, "response: %s", response.body)
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, true)
 	assert.Equal(t, "Bearer", capture.AuthScheme)
 	assert.Equal(t, beta, capture.AnthropicBeta)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalAnthropicUpstreamModel, false)
+	assertRewrittenExternalPayload(t, exchange.requestBody, capture.Body, externalAnthropicUpstreamModel, false)
 
 	after := f.waitForMetricDelta(t, before, externalAnthropicBearerModel, path, http.StatusOK, successfulExternalRequest, externalAnthropicBearerRouteName, externalAnthropicBearerProviderName, externalAnthropicUpstreamModel, 6)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalAnthropicBearerModel, path, externalAnthropicBearerRouteName, externalAnthropicBearerProviderName, externalAnthropicUpstreamModel, 6)
 	assertPositiveExternalInputAccounting(t, before, after, entry)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // testAnthropicStreaming covers tool, image, and document blocks together with
 // the complete Anthropic Messages SSE lifecycle.
 func (f externalProviderFixture) testAnthropicStreaming(t *testing.T) {
-	requestID := "external-anthropic-" + utils.RandomString(10)
-	path := "/v1/messages"
-	body := []byte(`{
-		"model":"` + externalAnthropicModel + `",
+	path := externalAnthropicMessagesPath
+	before := f.readMetricSnapshot(t, externalAnthropicModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalAnthropicRouteName, externalAnthropicProviderName, externalAnthropicUpstreamModel)
+	exchange := f.roundTrip(t, anthropicMessagesRequest(externalAnthropicModel, `{
 		"max_tokens":32,
 		"stream":true,
 		"tools":[{"name":"weather","description":"Get weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}],
@@ -330,39 +300,33 @@ func (f externalProviderFixture) testAnthropicStreaming(t *testing.T) {
 			{"role":"assistant","content":[{"type":"tool_use","id":"tool-weather","name":"weather","input":{"city":"Shanghai"}}]},
 			{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-weather","content":[{"type":"text","text":"sunny"}]}]}
 		]
-	}`)
-
-	before := f.readMetricSnapshot(t, externalAnthropicModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalAnthropicRouteName, externalAnthropicProviderName, externalAnthropicUpstreamModel)
-	response := f.sendJSONRequest(t, path, requestID, body)
+	}`))
+	response := exchange.response
 	require.Equal(t, http.StatusOK, response.statusCode, "response: %s", response.body)
 	assert.Contains(t, response.header.Get("Content-Type"), "text/event-stream")
 	assert.Contains(t, string(response.body), `"type":"message_stop"`)
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, true)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalAnthropicUpstreamModel, false)
+	assertRewrittenExternalPayload(t, exchange.requestBody, capture.Body, externalAnthropicUpstreamModel, false)
 
 	after := f.waitForMetricDelta(t, before, externalAnthropicModel, path, http.StatusOK, successfulExternalRequest, externalAnthropicRouteName, externalAnthropicProviderName, externalAnthropicUpstreamModel, 6)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalAnthropicModel, path, externalAnthropicRouteName, externalAnthropicProviderName, externalAnthropicUpstreamModel, 6)
 	assertPositiveExternalInputAccounting(t, before, after, entry)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // testNonTextInputAccounting fixes the accounting boundary: non-text input is
 // forwarded but excluded from the Router's local input-token estimate.
 func (f externalProviderFixture) testNonTextInputAccounting(t *testing.T) {
-	requestID := "external-image-only-" + utils.RandomString(10)
-	path := "/v1/chat/completions"
-	body := []byte(`{
-		"model":"` + externalOpenAIChatModel + `",
+	path := externalOpenAIChatPath
+	before := f.readMetricSnapshot(t, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
+	exchange := f.roundTrip(t, openAIChatRequest(externalOpenAIChatModel, `{
 		"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2U="}}]}],
 		"stream":false,
 		"max_tokens":16
-	}`)
-
-	before := f.readMetricSnapshot(t, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
-	response := f.sendJSONRequest(t, path, requestID, body)
+	}`))
+	response := exchange.response
 	require.Equal(t, http.StatusOK, response.statusCode, "response: %s", response.body)
 	var providerResponse struct {
 		Usage struct {
@@ -372,40 +336,39 @@ func (f externalProviderFixture) testNonTextInputAccounting(t *testing.T) {
 	require.NoError(t, json.Unmarshal(response.body, &providerResponse))
 	assert.Positive(t, providerResponse.Usage.PromptTokens, "mock provider usage must prove that local input accounting ignores provider input usage")
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, false)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, false)
+	assertRewrittenExternalPayload(t, exchange.requestBody, capture.Body, externalOpenAIChatUpstreamModel, false)
 	assert.Contains(t, string(capture.Body), `"type":"image_url"`)
 
 	after := f.waitForMetricDelta(t, before, externalOpenAIChatModel, path, http.StatusOK, successfulExternalRequest, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 5)
 	assert.Equal(t, float64(0), after.inputTokens-before.inputTokens)
 	assert.Equal(t, float64(5), after.outputTokens-before.outputTokens)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalOpenAIChatModel, path, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 5)
 	assert.Equal(t, 0, entry.InputTokens)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // testUpstream429 verifies that a provider rejection reaches the client unchanged
 // and is attributed to the upstream without recording output tokens.
 func (f externalProviderFixture) testUpstream429(t *testing.T) {
-	requestID := "external-429-" + utils.RandomString(10)
-	path := "/v1/chat/completions"
-	body := []byte(`{"model":"` + externalOpenAIChatModel + `","messages":[{"role":"user","content":"rate limit me"}],"stream":false}`)
-
+	path := externalOpenAIChatPath
 	before := f.readMetricSnapshot(t, externalOpenAIChatModel, path, http.StatusTooManyRequests, "upstream_response", testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
-	response := f.sendJSONRequest(t, path+"?mock_status=429", requestID, body)
+	request := openAIChatRequest(externalOpenAIChatModel, `{"messages":[{"role":"user","content":"rate limit me"}],"stream":false}`)
+	request.query = url.Values{"mock_status": []string{"429"}}
+	exchange := f.roundTrip(t, request)
+	response := exchange.response
 	require.Equal(t, http.StatusTooManyRequests, response.statusCode, "response: %s", response.body)
 	assert.Contains(t, string(response.body), `"type":"rate_limit_error"`)
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, false)
 	assert.Equal(t, "mock_status=429", capture.RawQuery)
-	assertRewrittenExternalPayload(t, body, capture.Body, externalOpenAIChatUpstreamModel, false)
+	assertRewrittenExternalPayload(t, exchange.requestBody, capture.Body, externalOpenAIChatUpstreamModel, false)
 
 	after := f.waitForMetricDelta(t, before, externalOpenAIChatModel, path, http.StatusTooManyRequests, "upstream_response", externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 0)
 	assert.Equal(t, float64(0), after.outputTokens-before.outputTokens)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assert.Equal(t, http.StatusTooManyRequests, entry.StatusCode)
 	assert.Equal(t, http.StatusTooManyRequests, entry.UpstreamStatusCode)
 	assert.Equal(t, 1, entry.UpstreamAttempts)
@@ -417,15 +380,15 @@ func (f externalProviderFixture) testUpstream429(t *testing.T) {
 	assert.Equal(t, 0, entry.OutputTokens)
 	require.NotNil(t, entry.Error)
 	assert.Equal(t, "upstream_response", entry.Error.Type)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // testActiveGaugeLifecycle holds an upstream request open long enough to observe
 // both active gauges, then verifies that they return to their baselines.
 func (f externalProviderFixture) testActiveGaugeLifecycle(t *testing.T) {
-	requestID := "external-active-" + utils.RandomString(10)
-	path := "/v1/chat/completions"
-	body := []byte(`{"model":"` + externalOpenAIChatModel + `","messages":[{"role":"user","content":"wait"}],"stream":false}`)
+	request := openAIChatRequest(externalOpenAIChatModel, `{"messages":[{"role":"user","content":"wait"}],"stream":false}`)
+	request.query = url.Values{"mock_delay_ms": []string{"1500"}}
+	exchange := f.prepareRequest(t, request)
+	path := request.path
 	downstreamBaseline, upstreamBaseline := f.readActiveGauges(t, externalOpenAIChatModel, testNamespace, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel)
 
 	type requestResult struct {
@@ -436,7 +399,7 @@ func (f externalProviderFixture) testActiveGaugeLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	go func() {
-		response, err := doExternalJSONRequest(ctx, f.routerURL, path+"?mock_delay_ms=1500", requestID, body)
+		response, err := exchange.send(ctx, f.routerURL)
 		resultCh <- requestResult{response: response, err: err}
 	}()
 
@@ -464,15 +427,14 @@ func (f externalProviderFixture) testActiveGaugeLifecycle(t *testing.T) {
 		return downstream == downstreamBaseline && upstream == upstreamBaseline
 	}, 3*time.Second, 100*time.Millisecond, "active downstream and upstream gauges did not return to baseline")
 
-	capture := fetchMockCapture(t, f.adminURL, requestID)
+	capture := exchange.capture(t)
 	assertExternalCapture(t, capture, path, false)
 	assert.Equal(t, "mock_delay_ms=1500", capture.RawQuery)
-	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, requestID)
+	entry := waitForExternalAccessLog(t, testCtx.KubeClient, kthenaNamespace, exchange.requestID)
 	assertSuccessfulExternalAccessLog(t, entry, externalOpenAIChatModel, path, externalOpenAIChatRouteName, externalOpenAIChatProviderName, externalOpenAIChatUpstreamModel, 5)
 	assert.Positive(t, entry.InputTokens)
 	assert.GreaterOrEqual(t, entry.DurationUpstreamProcessing, int64(1000))
 	assert.GreaterOrEqual(t, entry.DurationTotal, entry.DurationUpstreamProcessing)
-	deleteMockCapture(t, f.adminURL, requestID)
 }
 
 // assertExternalCapture checks normalized request metadata and the protocol-specific
