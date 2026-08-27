@@ -133,13 +133,14 @@ type externalMetricSnapshot struct {
 // externalProviderFixtureCleanup owns resources that must be released once even
 // when setup or an individual scenario fails.
 type externalProviderFixtureCleanup struct {
-	t               *testing.T
-	namespace       string
-	kubeClient      kubernetes.Interface
-	kthenaClient    *clientset.Clientset
-	portForwarder   utils.PortForwarder
-	routerForwarder utils.PortForwarder
-	once            sync.Once
+	t                *testing.T
+	namespace        string
+	kubeClient       kubernetes.Interface
+	kthenaClient     *clientset.Clientset
+	portForwarder    utils.PortForwarder
+	routerForwarder  utils.PortForwarder
+	metricsForwarder utils.PortForwarder
+	once             sync.Once
 }
 
 // setupExternalProviderFixture installs one TLS mock provider, its credentials,
@@ -163,6 +164,12 @@ func setupExternalProviderFixture(t *testing.T, testCtx *routercontext.RouterTes
 	require.NoError(t, err, "port-forward restarted Router for external provider tests")
 	cleanup.routerForwarder = routerForwarder
 	routerURL := fmt.Sprintf("http://127.0.0.1:%s", routerPort)
+
+	metricsPort := utils.AllocateLocalPort(t)
+	metricsForwarder, err := utils.SetupPortForward(routerNamespace, utils.RouterMetricsService, metricsPort, utils.RouterMetricsPort)
+	require.NoError(t, err, "port-forward Router metrics for external provider tests")
+	cleanup.metricsForwarder = metricsForwarder
+	metricsURL := fmt.Sprintf("http://127.0.0.1:%s/metrics", metricsPort)
 
 	service := utils.LoadYAMLFromFile[corev1.Service](filepath.Join(routercontext.TestDataDir, "ExternalProvider-Mock-Service.yaml"))
 	service.Namespace = namespace
@@ -232,7 +239,7 @@ func setupExternalProviderFixture(t *testing.T, testCtx *routercontext.RouterTes
 	return externalProviderFixture{
 		adminURL:   adminURL,
 		routerURL:  routerURL,
-		metricsURL: routerURL + "/metrics",
+		metricsURL: metricsURL,
 	}
 }
 
@@ -552,6 +559,9 @@ func (c *externalProviderFixtureCleanup) close() {
 		}
 		if c.routerForwarder != nil {
 			c.routerForwarder.Close()
+		}
+		if c.metricsForwarder != nil {
+			c.metricsForwarder.Close()
 		}
 		c.reportDeleteError("Deployment", externalProviderMockName, c.kubeClient.AppsV1().Deployments(c.namespace).Delete(ctx, externalProviderMockName, metav1.DeleteOptions{}))
 		c.reportDeleteError("Service", externalProviderMockName, c.kubeClient.CoreV1().Services(c.namespace).Delete(ctx, externalProviderMockName, metav1.DeleteOptions{}))
