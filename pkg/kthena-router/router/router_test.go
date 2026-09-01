@@ -3077,6 +3077,7 @@ func TestRouter_HandlerFunc_UnknownModel_RejectsBeforeQueueing(t *testing.T) {
 
 type mockKVConnector struct {
 	calls        atomic.Int32
+	timeout      time.Duration
 	proxyHandler func(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *connectors.OnFlightHooks) (int, error)
 }
 
@@ -3084,8 +3085,9 @@ func (m *mockKVConnector) Name() string {
 	return "mock"
 }
 
-func (m *mockKVConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *connectors.OnFlightHooks) (int, error) {
+func (m *mockKVConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, timeout time.Duration, hooks *connectors.OnFlightHooks) (int, error) {
 	m.calls.Add(1)
+	m.timeout = timeout
 	if m.proxyHandler != nil {
 		return m.proxyHandler(c, reqBody, prefillAddr, decodeAddr, hooks)
 	}
@@ -3182,7 +3184,7 @@ func TestRouter_ProxyToPDDisaggregated_RetryBehavior(t *testing.T) {
 			c, _ := gin.CreateTestContext(w)
 			c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"test-model"}`))
 
-			err := router.proxyToPDDisaggregated(c, c.Request, ctx, mockConnector, ModelRequest{"model": "test-model"}, 8000)
+			err := router.proxyToPDDisaggregated(c, c.Request, ctx, mockConnector, ModelRequest{"model": "test-model"}, 8000, 2*time.Second)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -3191,6 +3193,7 @@ func TestRouter_ProxyToPDDisaggregated_RetryBehavior(t *testing.T) {
 				assert.NoError(t, err)
 			}
 			assert.Equal(t, tt.wantCalls, mockConnector.calls.Load(), tt.callsMsg)
+			assert.Equal(t, 2*time.Second, mockConnector.timeout)
 			assert.Equal(t, tt.wantStatus, w.Code)
 		})
 	}

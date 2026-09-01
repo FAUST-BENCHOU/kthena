@@ -955,7 +955,7 @@ func (r *Router) proxyModelEndpoint(
 	}
 
 	// PD disaggregated mode - use KV connector
-	return r.proxyToPDDisaggregated(c, req, ctx, kvConnector, modelRequest, port)
+	return r.proxyToPDDisaggregated(c, req, ctx, kvConnector, modelRequest, port, timeout)
 }
 
 func (r *Router) proxyExternalProvider(
@@ -1398,6 +1398,7 @@ func (r *Router) proxyToPDDisaggregated(
 	kvConnector connectors.KVConnector,
 	modelRequest ModelRequest,
 	port int32,
+	timeout time.Duration,
 ) error {
 	// Get metrics recorder from context
 	var metricsRecorder *metrics.RequestMetricsRecorder
@@ -1439,7 +1440,7 @@ func (r *Router) proxyToPDDisaggregated(
 		}
 
 		// Execute the PD disaggregated proxy operation
-		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr, hooks)
+		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr, timeout, hooks)
 		if c.Writer.Written() {
 			accesslog.SetUpstreamInfo(c, c.Writer.Status(), 0)
 		}
