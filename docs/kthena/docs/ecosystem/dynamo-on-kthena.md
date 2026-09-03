@@ -1,4 +1,4 @@
-# Integrate Dynamo with Kthena
+# NVIDIA Dynamo on Kthena
 
 This guide describes how to run [NVIDIA Dynamo](https://github.com/ai-dynamo/dynamo) multinode workloads with Kthena. Dynamo creates standard `LeaderWorkerSet` (LWS) resources, and Kthena reconciles them into `ModelServing` workloads.
 
@@ -27,8 +27,8 @@ Kthena preserves the LWS behavior observed by Dynamo's distributed runtimes:
 
 - A Kubernetes cluster supported by Dynamo and Kthena.
 - [Volcano](https://volcano.sh/en/docs/installation/) installed and available for gang scheduling.
+- The [LeaderWorkerSet CRD](https://github.com/kubernetes-sigs/lws) installed before starting the Kthena Controller Manager (validated with LWS CRD `v0.10.0`).
 - Kthena installed with the workload controller and webhook enabled. See the [Kthena installation guide](../getting-started/installation.md).
-- The [LeaderWorkerSet CRD](https://github.com/kubernetes-sigs/lws), without the native LWS controller or webhook.
 - Dynamo installed according to its [installation documentation](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/install-dynamo.md).
 
 :::warning
@@ -111,4 +111,4 @@ This identity supports Dynamo TRT-LLM's worker-host derivation from the leader a
 - The Kthena workload webhook must remain enabled for Dynamo-generated LWS resources.
 - This integration covers the current Dynamo LWS workload contract; it does not change Dynamo or provide a general replacement for every LWS feature.
 
-For an overview of Kthena's LeaderWorkerSet integration, see [LeaderWorkerSet integration](./lws-integration.md).
+For an overview of Kthena's LeaderWorkerSet integration, see [LeaderWorkerSet integration](../user-guide/lws-integration.md).

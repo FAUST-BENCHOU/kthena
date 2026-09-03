@@ -56,11 +56,6 @@ const sidebars: SidebarsConfig = {
             'user-guide/modelserving-plugin-framework',
           ],
         },
-        {
-          type: 'category',
-          label: 'Integrations',
-          items: ['user-guide/dynamo-integration', 'user-guide/llm-d-router-integration'],
-        },
         'user-guide/multi-node-inference',
         {
           type: 'doc',
@@ -114,6 +109,11 @@ const sidebars: SidebarsConfig = {
           ],
         },
       ],
+    },
+    {
+      type: 'category',
+      label: 'Ecosystem',
+      items: ['ecosystem/dynamo-on-kthena', 'ecosystem/llm-d-router-with-kthena'],
     },
     {
       type: 'category',
