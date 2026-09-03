@@ -137,7 +137,7 @@ func (n *NIXLConnector) prefill(req *http.Request, prefillAddr string, timeout t
 		defer cancel()
 		req = req.WithContext(ctx)
 	}
-	resp, err := http.DefaultTransport.RoundTrip(req)
+	resp, err := upstreamTransport.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
