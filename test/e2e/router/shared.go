@@ -2074,21 +2074,13 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 		hdr := map[string]string{"X-Sticky-Session": "ss08-failover"}
 		stickyPod := utils.SessionStickySelectedPodAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages, hdr)
 		require.NotEmpty(t, stickyPod)
-		pl, err := testCtx.KubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: fmt.Sprintf("app=%s", routercontext.Deployment1_5bName),
-		})
-		require.NoError(t, err)
-		var deleted bool
-		for i := range pl.Items {
-			if pl.Items[i].Name == stickyPod {
-				err := testCtx.KubeClient.CoreV1().Pods(testNamespace).Delete(ctx, pl.Items[i].Name, metav1.DeleteOptions{})
-				require.NoError(t, err)
-				deleted = true
-				break
-			}
-		}
-		require.True(t, deleted, "expected to delete the sticky backend pod %s", stickyPod)
-		utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, testNamespace, "deepseek-r1-1-5b", 3, defaultScalingTimeout)
+		pod, err := testCtx.KubeClient.CoreV1().Pods(testNamespace).Get(ctx, stickyPod, metav1.GetOptions{})
+		require.NoError(t, err, "expected sticky backend pod %s to exist", stickyPod)
+		deployName := pod.Labels["app"]
+		require.NotEmpty(t, deployName, "sticky backend pod %s missing app label", stickyPod)
+		err = testCtx.KubeClient.CoreV1().Pods(testNamespace).Delete(ctx, stickyPod, metav1.DeleteOptions{})
+		require.NoError(t, err, "expected to delete the sticky backend pod %s", stickyPod)
+		utils.WaitForDeploymentReady(t, ctx, testCtx.KubeClient, testNamespace, deployName, 3, defaultScalingTimeout)
 		newPod := utils.SessionStickySelectedPodAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages, hdr)
 		require.NotEmpty(t, newPod)
 		require.NotEqual(t, stickyPod, newPod, "after backend loss same session must not route to deleted pod name")
