@@ -31,20 +31,21 @@ func ExtractSessionKey(c *gin.Context, spec *networkingv1alpha1.SessionSticky) s
 	return ""
 }
 
-// LookupHint extracts the session key and returns a mapped Pod name from the store when present.
-func LookupHint(c *gin.Context, route types.NamespacedName, spec *networkingv1alpha1.SessionSticky, store Store) (sessionKey, storeKey, hint string) {
+// LookupBinding extracts the session key and returns a mapped ModelServer+Pod binding when present.
+func LookupBinding(c *gin.Context, route types.NamespacedName, spec *networkingv1alpha1.SessionSticky, store Store) (sessionKey, storeKey string, binding Binding, ok bool) {
 	if spec == nil || store == nil || c == nil {
-		return "", "", ""
+		return "", "", Binding{}, false
 	}
 	sessionKey = ExtractSessionKey(c, spec)
 	if sessionKey == "" {
-		return "", "", ""
+		return "", "", Binding{}, false
 	}
 	storeKey = MappingKey(route, sessionKey)
-	if mapped, ok := store.Get(c.Request.Context(), storeKey); ok && mapped != "" {
-		hint = mapped
+	binding, ok = store.Get(c.Request.Context(), storeKey)
+	if !ok || !binding.Valid() {
+		return sessionKey, storeKey, Binding{}, false
 	}
-	return sessionKey, storeKey, hint
+	return sessionKey, storeKey, binding, true
 }
 
 func extractOne(c *gin.Context, src *networkingv1alpha1.SessionKeySource) string {

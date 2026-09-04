@@ -20,13 +20,13 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 )
 
-// Store persists session key → upstream Pod name with TTL.
+// Store persists session key → ModelServer+Pod binding with TTL.
 type Store interface {
-	Get(ctx context.Context, key string) (podName string, ok bool)
+	Get(ctx context.Context, key string) (Binding, bool)
 	Delete(ctx context.Context, key string)
-	// Commit sets or refreshes binding to podName; returns the canonical pod name
+	// Commit sets or refreshes binding; returns the canonical binding
 	// (may differ when another replica wins under Redis).
-	Commit(ctx context.Context, key, podName string, ttl time.Duration) (string, error)
+	Commit(ctx context.Context, key string, binding Binding, ttl time.Duration) (Binding, error)
 	Close() error
 }
 
@@ -55,8 +55,8 @@ func NewStore(cfg *conf.SessionStickyConfig) (Store, error) {
 }
 
 type memoryEntry struct {
-	pod   string
-	until time.Time
+	binding Binding
+	until   time.Time
 }
 
 // MemoryStore is a process-local TTL map with a background sweeper.
@@ -103,14 +103,14 @@ func (s *MemoryStore) sweepExpired() {
 	}
 }
 
-func (s *MemoryStore) Get(_ context.Context, key string) (string, bool) {
+func (s *MemoryStore) Get(_ context.Context, key string) (Binding, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	e, ok := s.m[key]
-	if !ok || !e.until.After(time.Now()) {
-		return "", false
+	if !ok || !e.until.After(time.Now()) || !e.binding.Valid() {
+		return Binding{}, false
 	}
-	return e.pod, true
+	return e.binding, true
 }
 
 func (s *MemoryStore) Delete(_ context.Context, key string) {
@@ -119,7 +119,10 @@ func (s *MemoryStore) Delete(_ context.Context, key string) {
 	delete(s.m, key)
 }
 
-func (s *MemoryStore) Commit(_ context.Context, key, podName string, ttl time.Duration) (string, error) {
+func (s *MemoryStore) Commit(_ context.Context, key string, binding Binding, ttl time.Duration) (Binding, error) {
+	if !binding.Valid() {
+		return Binding{}, fmt.Errorf("invalid session sticky binding")
+	}
 	if ttl <= 0 {
 		ttl = time.Second
 	}
@@ -130,15 +133,15 @@ func (s *MemoryStore) Commit(_ context.Context, key, podName string, ttl time.Du
 	defer s.mu.Unlock()
 
 	cur, ok := s.m[key]
-	if ok && cur.until.After(now) {
-		if cur.pod != podName {
-			return cur.pod, nil
+	if ok && cur.until.After(now) && cur.binding.Valid() {
+		if !cur.binding.Equal(binding) {
+			return cur.binding, nil
 		}
-		s.m[key] = memoryEntry{pod: podName, until: until}
-		return podName, nil
+		s.m[key] = memoryEntry{binding: binding, until: until}
+		return binding, nil
 	}
-	s.m[key] = memoryEntry{pod: podName, until: until}
-	return podName, nil
+	s.m[key] = memoryEntry{binding: binding, until: until}
+	return binding, nil
 }
 
 func (s *MemoryStore) Close() error {
@@ -151,22 +154,25 @@ func (s *MemoryStore) Close() error {
 	return nil
 }
 
-// RedisStore uses Redis with compare-and-refresh semantics in a Lua script.
+// RedisStore uses a Redis hash (modelServer/pod fields) with compare-and-refresh semantics.
 type RedisStore struct {
 	rdb *redis.Client
 }
 
-// stickyCommitScript: set if missing; refresh TTL if same pod; otherwise return existing pod.
+// stickyCommitScript: create hash if missing; refresh TTL if same binding; otherwise return existing fields.
+// Returns {modelServer, pod}.
 const stickyCommitScript = `
-local cur = redis.call('GET', KEYS[1])
-if cur == false then
-  redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
-  return ARGV[1]
-elseif cur == ARGV[1] then
-  redis.call('EXPIRE', KEYS[1], ARGV[2])
-  return ARGV[1]
+local ms = redis.call('HGET', KEYS[1], 'modelServer')
+local pod = redis.call('HGET', KEYS[1], 'pod')
+if (not ms) or (not pod) then
+  redis.call('HSET', KEYS[1], 'modelServer', ARGV[1], 'pod', ARGV[2])
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+  return {ARGV[1], ARGV[2]}
+elseif ms == ARGV[1] and pod == ARGV[2] then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+  return {ARGV[1], ARGV[2]}
 else
-  return cur
+  return {ms, pod}
 end
 `
 
@@ -182,16 +188,20 @@ func NewRedisStore(addr string) (*RedisStore, error) {
 	return &RedisStore{rdb: rdb}, nil
 }
 
-func (s *RedisStore) Get(ctx context.Context, key string) (string, bool) {
-	v, err := s.rdb.Get(ctx, key).Result()
-	if err == redis.Nil || v == "" {
-		return "", false
+func (s *RedisStore) Get(ctx context.Context, key string) (Binding, bool) {
+	vals, err := s.rdb.HMGet(ctx, key, redisFieldModelServer, redisFieldPod).Result()
+	if err == redis.Nil {
+		return Binding{}, false
 	}
 	if err != nil {
-		klog.Errorf("session sticky redis GET: %v", err)
-		return "", false
+		klog.Errorf("session sticky redis HMGET: %v", err)
+		return Binding{}, false
 	}
-	return v, true
+	b, ok := bindingFromRedisFields(vals)
+	if !ok {
+		return Binding{}, false
+	}
+	return b, true
 }
 
 func (s *RedisStore) Delete(ctx context.Context, key string) {
@@ -200,22 +210,46 @@ func (s *RedisStore) Delete(ctx context.Context, key string) {
 	}
 }
 
-func (s *RedisStore) Commit(ctx context.Context, key, podName string, ttl time.Duration) (string, error) {
+func (s *RedisStore) Commit(ctx context.Context, key string, binding Binding, ttl time.Duration) (Binding, error) {
+	if !binding.Valid() {
+		return Binding{}, fmt.Errorf("invalid session sticky binding")
+	}
 	sec := int(ttl / time.Second)
 	if sec < 1 {
 		sec = 1
 	}
-	res, err := s.rdb.Eval(ctx, stickyCommitScript, []string{key}, podName, sec).Result()
+	res, err := s.rdb.Eval(ctx, stickyCommitScript, []string{key}, binding.ModelServer, binding.Pod, sec).Result()
 	if err != nil {
-		return podName, err
+		return binding, err
 	}
-	out, _ := res.(string)
-	if out == "" {
-		return podName, nil
+	out, ok := bindingFromLuaResult(res)
+	if !ok {
+		return binding, nil
 	}
 	return out, nil
 }
 
 func (s *RedisStore) Close() error {
 	return s.rdb.Close()
+}
+
+func bindingFromRedisFields(vals []interface{}) (Binding, bool) {
+	if len(vals) < 2 {
+		return Binding{}, false
+	}
+	ms, _ := vals[0].(string)
+	pod, _ := vals[1].(string)
+	b := Binding{ModelServer: ms, Pod: pod}
+	if !b.Valid() {
+		return Binding{}, false
+	}
+	return b, true
+}
+
+func bindingFromLuaResult(res interface{}) (Binding, bool) {
+	arr, ok := res.([]interface{})
+	if !ok {
+		return Binding{}, false
+	}
+	return bindingFromRedisFields(arr)
 }

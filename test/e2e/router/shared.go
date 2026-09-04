@@ -1950,43 +1950,51 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 
 	t.Run("E2E_SS_01_BasicStickinessHeader", func(t *testing.T) {
 		hdr := map[string]string{"X-Sticky-Session": "ss01-alpha"}
-		var first string
+		var first utils.SessionStickyBackend
 		for range 8 {
-			pod := utils.SessionStickySelectedPodAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages, hdr)
-			require.NotEmpty(t, pod)
-			if first == "" {
-				first = pod
+			got := utils.SessionStickySelectedBackendAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages, hdr)
+			require.NotEmpty(t, got.Pod)
+			require.NotEmpty(t, got.ModelServer, "access log must include model_server for multi-target sticky")
+			if first.Pod == "" {
+				first = got
 			} else {
-				require.Equal(t, first, pod)
+				require.Equal(t, first.Pod, got.Pod, "same session must stick to the same pod across weighted targets")
+				require.Equal(t, first.ModelServer, got.ModelServer, "same session must stick to the same ModelServer across weighted targets")
 			}
 		}
 	})
 
 	t.Run("E2E_SS_02_SessionKeyIsolation", func(t *testing.T) {
-		var keyA, keyB, a, b string
+		var keyA, keyB string
+		var a, b utils.SessionStickyBackend
 		require.Eventually(t, func() bool {
 			keyA = "ss02-key-a-" + utils.RandomString(6)
 			keyB = "ss02-key-b-" + utils.RandomString(6)
-			a = utils.SessionStickySelectedPodAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages,
+			a = utils.SessionStickySelectedBackendAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages,
 				map[string]string{"X-Sticky-Session": keyA})
-			b = utils.SessionStickySelectedPodAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages,
+			b = utils.SessionStickySelectedBackendAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages,
 				map[string]string{"X-Sticky-Session": keyB})
-			return a != "" && b != "" && a != b
+			return a.Pod != "" && b.Pod != "" && a.Pod != b.Pod
 		}, 3*time.Minute, 400*time.Millisecond,
 			"two fresh session keys should land on different backends (random score + multiple replicas)")
-		secondCallPod := utils.SessionStickySelectedPodAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages,
+		second := utils.SessionStickySelectedBackendAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages,
 			map[string]string{"X-Sticky-Session": keyA})
-		require.Equal(t, a, secondCallPod, "returning to first session key must not adopt second key binding")
+		require.Equal(t, a.Pod, second.Pod, "returning to first session key must not adopt second key binding")
+		require.Equal(t, a.ModelServer, second.ModelServer, "returning to first session key must keep the same ModelServer")
 	})
 
 	t.Run("E2E_SS_03_NoStickyKeyLoadSpread", func(t *testing.T) {
-		seen := map[string]struct{}{}
+		seenPods := map[string]struct{}{}
+		seenServers := map[string]struct{}{}
 		for range 8 {
-			p := utils.SessionStickySelectedPodAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages, nil)
-			require.NotEmpty(t, p)
-			seen[p] = struct{}{}
+			got := utils.SessionStickySelectedBackendAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages, nil)
+			require.NotEmpty(t, got.Pod)
+			require.NotEmpty(t, got.ModelServer)
+			seenPods[got.Pod] = struct{}{}
+			seenServers[got.ModelServer] = struct{}{}
 		}
-		require.GreaterOrEqual(t, len(seen), 2, "without sticky header expect LB spread across backends")
+		require.GreaterOrEqual(t, len(seenPods), 2, "without sticky header expect LB spread across backends")
+		require.GreaterOrEqual(t, len(seenServers), 2, "without sticky header expect weighted multi-target spread across ModelServers")
 	})
 
 	t.Run("E2E_SS_04_NoSessionStickyConfigIgnoresStickyLikeHeader", func(t *testing.T) {
@@ -2008,28 +2016,32 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 
 	t.Run("E2E_SS_05_QuerySourceStickiness", func(t *testing.T) {
 		url := routerConn.URL + "?sticky_q=ss05-one"
-		var first string
+		var first utils.SessionStickyBackend
 		for range 6 {
-			pod := utils.SessionStickySelectedPodAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, url, created.Spec.ModelName, messages, nil)
-			require.NotEmpty(t, pod)
-			if first == "" {
-				first = pod
+			got := utils.SessionStickySelectedBackendAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, url, created.Spec.ModelName, messages, nil)
+			require.NotEmpty(t, got.Pod)
+			require.NotEmpty(t, got.ModelServer)
+			if first.Pod == "" {
+				first = got
 			} else {
-				require.Equal(t, first, pod)
+				require.Equal(t, first.Pod, got.Pod)
+				require.Equal(t, first.ModelServer, got.ModelServer)
 			}
 		}
 	})
 
 	t.Run("E2E_SS_06_CookieSourceStickiness", func(t *testing.T) {
 		hdr := map[string]string{"Cookie": "sticky_sid=ss06-cookie-val"}
-		var first string
+		var first utils.SessionStickyBackend
 		for range 6 {
-			pod := utils.SessionStickySelectedPodAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages, hdr)
-			require.NotEmpty(t, pod)
-			if first == "" {
-				first = pod
+			got := utils.SessionStickySelectedBackendAfterChatURLHeaders(t, testCtx.KubeClient, kthenaNamespace, routerConn.URL, created.Spec.ModelName, messages, hdr)
+			require.NotEmpty(t, got.Pod)
+			require.NotEmpty(t, got.ModelServer)
+			if first.Pod == "" {
+				first = got
 			} else {
-				require.Equal(t, first, pod)
+				require.Equal(t, first.Pod, got.Pod)
+				require.Equal(t, first.ModelServer, got.ModelServer)
 			}
 		}
 	})
@@ -2133,8 +2145,10 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 		mr := utils.SessionStickyCreateModelRoute(t, ctx, testCtx.KthenaClient, routercontext.TestDataDir, testNamespace, kthenaNamespace, useGatewayAPI, func(m *networkingv1alpha1.ModelRoute) {
 			m.Name = "deepseek-pd-with-sticky"
 			m.Spec.ModelName = "deepseek-r1-1-5b-pd-disaggregation"
-			if len(m.Spec.Rules) > 0 && len(m.Spec.Rules[0].TargetModels) > 0 {
-				m.Spec.Rules[0].TargetModels[0].ModelServerName = pdModelServerName
+			if len(m.Spec.Rules) > 0 {
+				m.Spec.Rules[0].TargetModels = []*networkingv1alpha1.TargetModel{
+					{ModelServerName: pdModelServerName},
+				}
 			}
 		})
 		utils.SessionStickyRegisterModelRouteCleanup(t, testCtx.KthenaClient, testNamespace, mr)

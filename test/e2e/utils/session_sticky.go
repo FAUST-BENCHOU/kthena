@@ -77,8 +77,20 @@ sessionSticky:
 `, redisAddr)
 }
 
+// SessionStickyBackend is the upstream selected for one sticky E2E request.
+type SessionStickyBackend struct {
+	Pod         string
+	ModelServer string // access-log form: namespace/name
+}
+
 // SessionStickySelectedPodAfterChatURLHeaders sends a chat request to url and reads selected_pod from router logs.
 func SessionStickySelectedPodAfterChatURLHeaders(t *testing.T, kube kubernetes.Interface, kthenaNamespace, url, modelName string, messages []ChatMessage, extra map[string]string) string {
+	t.Helper()
+	return SessionStickySelectedBackendAfterChatURLHeaders(t, kube, kthenaNamespace, url, modelName, messages, extra).Pod
+}
+
+// SessionStickySelectedBackendAfterChatURLHeaders sends a chat request and reads selected_pod + model_server from router logs.
+func SessionStickySelectedBackendAfterChatURLHeaders(t *testing.T, kube kubernetes.Interface, kthenaNamespace, url, modelName string, messages []ChatMessage, extra map[string]string) SessionStickyBackend {
 	t.Helper()
 	requestID := "e2e-ss-" + RandomString(16)
 	headers := map[string]string{"x-request-id": requestID}
@@ -98,15 +110,27 @@ func SessionStickySelectedPodAfterChatURLHeaders(t *testing.T, kube kubernetes.I
 				continue
 			}
 			for _, line := range strings.Split(string(raw), "\n") {
-				if podName := sessionStickyParseSelectedPodFromAccessLogLine(line, requestID); podName != "" {
-					return podName
+				if backend := sessionStickyParseBackendFromAccessLogLine(line, requestID); backend.Pod != "" {
+					return backend
 				}
 			}
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
 	require.Failf(t, "selected_pod not found in router access logs", "request_id=%s", requestID)
-	return ""
+	return SessionStickyBackend{}
+}
+
+func sessionStickyParseBackendFromAccessLogLine(line, requestID string) SessionStickyBackend {
+	entry, ok := ParseRouterAccessLogLine([]byte(line))
+	if ok && entry.RequestID == requestID && entry.SelectedPod != "" {
+		return SessionStickyBackend{Pod: entry.SelectedPod, ModelServer: entry.ModelServer}
+	}
+	// Fallback for lines that only match the sticky request-id + selected_pod regexes.
+	if pod := sessionStickyParseSelectedPodFromAccessLogLine(line, requestID); pod != "" {
+		return SessionStickyBackend{Pod: pod}
+	}
+	return SessionStickyBackend{}
 }
 
 func sessionStickyParseSelectedPodFromAccessLogLine(line, requestID string) string {

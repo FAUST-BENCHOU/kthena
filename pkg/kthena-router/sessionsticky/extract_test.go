@@ -85,22 +85,23 @@ func TestMemoryStore_GetSetTTL(t *testing.T) {
 	_, ok := s.Get(ctx, key)
 	require.False(t, ok)
 
-	_, err := s.Commit(ctx, key, "pod-a", 2*time.Second)
+	want := Binding{ModelServer: "ms-a", Pod: "pod-a"}
+	_, err := s.Commit(ctx, key, want, 2*time.Second)
 	require.NoError(t, err)
 	v, ok := s.Get(ctx, key)
 	require.True(t, ok)
-	require.Equal(t, "pod-a", v)
+	require.Equal(t, want, v)
 
-	out, err := s.Commit(ctx, key, "pod-b", 2*time.Second)
+	out, err := s.Commit(ctx, key, Binding{ModelServer: "ms-b", Pod: "pod-b"}, 2*time.Second)
 	require.NoError(t, err)
-	require.Equal(t, "pod-a", out)
+	require.Equal(t, want, out)
 }
 
 func TestMemoryStore_GetMissAfterTTL(t *testing.T) {
 	ctx := t.Context()
 	s := NewMemoryStore()
 	key := "k-ttl"
-	_, err := s.Commit(ctx, key, "pod-a", 50*time.Millisecond)
+	_, err := s.Commit(ctx, key, Binding{ModelServer: "ms-a", Pod: "pod-a"}, 50*time.Millisecond)
 	require.NoError(t, err)
 
 	time.Sleep(80 * time.Millisecond)
@@ -115,4 +116,13 @@ func TestMappingKey_Deterministic(t *testing.T) {
 	b := MappingKey(types.NamespacedName{Namespace: "ns", Name: "r"}, "sess")
 	require.Equal(t, a, b)
 	require.NotEqual(t, a, MappingKey(types.NamespacedName{Namespace: "ns", Name: "r2"}, "sess"))
+}
+
+func TestBinding_ValidEqual(t *testing.T) {
+	a := Binding{ModelServer: "ms-a", Pod: "pod-a"}
+	require.True(t, a.Valid())
+	require.True(t, a.Equal(Binding{ModelServer: "ms-a", Pod: "pod-a"}))
+	require.False(t, a.Equal(Binding{ModelServer: "ms-b", Pod: "pod-a"}))
+	require.False(t, Binding{}.Valid())
+	require.Equal(t, "ms-a/pod-a", a.String())
 }
