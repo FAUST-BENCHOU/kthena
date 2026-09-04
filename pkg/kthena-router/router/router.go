@@ -450,10 +450,24 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 
 	var isLora bool
 	var err error
-	// Try to match ModelRoute first
-	modelTarget, isLora, modelRoute, err = r.store.MatchModelTarget(modelName, c.Request, gatewayKey)
+	// Match once; if a sticky ModelServer binding exists, rematch with that preference.
+	modelTarget, isLora, modelRoute, err = r.store.MatchModelTarget(modelName, c.Request, gatewayKey, "")
 	if err != nil {
 		accesslog.SetError(c, "model_route_matching", fmt.Sprintf("failed to match model route target: %v", err))
+	}
+
+	var stickySpec *v1alpha1.SessionSticky
+	var sessionKey, stickyStoreKey string
+	var stickyBinding sessionsticky.Binding
+	var stickyBindingOK bool
+	if err == nil && modelRoute != nil {
+		stickySpec, sessionKey, stickyStoreKey, stickyBinding, stickyBindingOK = r.lookupSessionStickyBinding(c, modelRoute)
+		if stickyBindingOK {
+			modelTarget, isLora, modelRoute, err = r.store.MatchModelTarget(modelName, c.Request, gatewayKey, stickyBinding.ModelServer)
+			if err != nil {
+				accesslog.SetError(c, "model_route_matching", fmt.Sprintf("failed to match model route target: %v", err))
+			}
+		}
 	}
 
 	if err == nil && strings.HasPrefix(c.Request.URL.Path, "/v1/") {
@@ -629,7 +643,18 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	if modelServer != nil && modelServer.Spec.Model != nil && !isLora {
 		upstreamModelForMetrics = *modelServer.Spec.Model
 	}
-	stickySpec, sessionKey, stickyStoreKey, stickyHint := r.lookupSessionStickyHint(c, modelRoute, pdGroup)
+
+	// PD disaggregated models skip session sticky entirely (lookup ran earlier for target pinning).
+	stickyHint := ""
+	if stickySpec != nil && pdGroup != nil {
+		klog.InfoS("session sticky bypassed for PD disaggregated model", "modelRoute", klog.KObj(modelRoute))
+		stickySpec = nil
+		sessionKey, stickyStoreKey = "", ""
+		stickyBindingOK = false
+	}
+	if stickySpec != nil && stickyBindingOK {
+		stickyHint = stickyBinding.Pod
+	}
 
 	ctx := &framework.Context{
 		Model:           modelName,
@@ -649,7 +674,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		return fmt.Errorf("can't schedule to target pod: %v", err)
 	}
 
-	r.finalizeSessionSticky(c, ctx, pods, stickySpec, sessionKey, stickyStoreKey, stickyHint)
+	r.finalizeSessionSticky(c, ctx, pods, stickySpec, sessionKey, stickyStoreKey, stickyBinding, stickyBindingOK, modelServerName.Name)
 
 	// Set complete request routing information in access log
 	modelServerFullName := ""
@@ -711,36 +736,35 @@ func upstreamTimeoutFor(ms *v1alpha1.ModelServer) time.Duration {
 	return ms.Spec.TrafficPolicy.Timeout.Duration
 }
 
-func (r *Router) lookupSessionStickyHint(c *gin.Context, modelRoute *v1alpha1.ModelRoute, pdGroup *v1alpha1.PDGroup) (
-	stickySpec *v1alpha1.SessionSticky, sessionKey, stickyStoreKey, hint string,
+func (r *Router) lookupSessionStickyBinding(c *gin.Context, modelRoute *v1alpha1.ModelRoute) (
+	stickySpec *v1alpha1.SessionSticky, sessionKey, stickyStoreKey string, binding sessionsticky.Binding, ok bool,
 ) {
-	if modelRoute != nil {
-		stickySpec = modelRoute.Spec.SessionSticky
+	if modelRoute == nil {
+		return nil, "", "", sessionsticky.Binding{}, false
 	}
-	if stickySpec != nil && pdGroup != nil && modelRoute != nil {
-		klog.InfoS("session sticky bypassed for PD disaggregated model", "modelRoute", klog.KObj(modelRoute))
-		stickySpec = nil
+	stickySpec = modelRoute.Spec.SessionSticky
+	if stickySpec == nil || r.sessionStickyStore == nil {
+		return stickySpec, "", "", sessionsticky.Binding{}, false
 	}
-	if stickySpec == nil || r.sessionStickyStore == nil || modelRoute == nil {
-		return stickySpec, "", "", ""
-	}
-	sessionKey, stickyStoreKey, hint = sessionsticky.LookupHint(
+	sessionKey, stickyStoreKey, binding, ok = sessionsticky.LookupBinding(
 		c,
 		types.NamespacedName{Namespace: modelRoute.Namespace, Name: modelRoute.Name},
 		stickySpec,
 		r.sessionStickyStore,
 	)
-	return stickySpec, sessionKey, stickyStoreKey, hint
+	return stickySpec, sessionKey, stickyStoreKey, binding, ok
 }
 
 // finalizeSessionSticky runs post-schedule session affinity bookkeeping (clear stale bindings, commit winner).
-// Additional post-schedule hooks can be chained here as the router grows.
 func (r *Router) finalizeSessionSticky(
 	c *gin.Context,
 	ctx *framework.Context,
 	pods []*datastore.PodInfo,
 	stickySpec *v1alpha1.SessionSticky,
-	sessionKey, stickyStoreKey, stickyHint string,
+	sessionKey, stickyStoreKey string,
+	prev sessionsticky.Binding,
+	prevOK bool,
+	selectedModelServer string,
 ) {
 	// No backing store or session key could not be resolved from the request.
 	if r.sessionStickyStore == nil || sessionKey == "" || stickyStoreKey == "" {
@@ -748,15 +772,19 @@ func (r *Router) finalizeSessionSticky(
 	}
 
 	// Route has no session sticky or scheduling did not pick a pod to bind.
-	if stickySpec == nil || len(ctx.BestPods) == 0 || ctx.BestPods[0].Pod == nil {
+	if stickySpec == nil || selectedModelServer == "" || len(ctx.BestPods) == 0 || ctx.BestPods[0].Pod == nil {
 		return
 	}
 
-	selected := ctx.BestPods[0].Pod.Name
+	selected := sessionsticky.Binding{
+		ModelServer: selectedModelServer,
+		Pod:         ctx.BestPods[0].Pod.Name,
+	}
 	reqCtx := c.Request.Context()
-	if stickyHint != "" && stickyHint != selected {
+	if prevOK && !prev.Equal(selected) {
 		r.sessionStickyStore.Delete(reqCtx, stickyStoreKey)
-		klog.InfoS("session sticky: mapped pod no longer selectable, cleared binding", "key", stickyStoreKey, "hint", stickyHint, "selected", selected)
+		klog.InfoS("session sticky: mapped binding no longer selectable, cleared",
+			"key", stickyStoreKey, "prev", prev.String(), "selected", selected.String())
 	}
 
 	ttl := sessionsticky.TTL(stickySpec)
@@ -765,11 +793,12 @@ func (r *Router) finalizeSessionSticky(
 		klog.Errorf("session sticky commit: %v", err)
 		return
 	}
-	if out == "" || out == selected {
+	if !out.Valid() || out.Equal(selected) {
 		return
 	}
+	// Another replica won the binding; honor its pod if still in the candidate list.
 	for _, p := range pods {
-		if p.Pod != nil && p.Pod.Name == out {
+		if p.Pod != nil && p.Pod.Name == out.Pod {
 			ctx.BestPods = []*datastore.PodInfo{p}
 			return
 		}

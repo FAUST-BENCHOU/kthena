@@ -18,3 +18,6 @@ spec:
   - name: "default"
     targetModels:
     - modelServerName: "deepseek-r1-1-5b"
+      weight: 50
+    - modelServerName: "deepseek-r1-7b"
+      weight: 50
