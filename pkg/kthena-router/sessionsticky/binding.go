@@ -9,13 +9,14 @@ package sessionsticky
 
 import "fmt"
 
-// Redis hash field names for session sticky bindings (same style as rate-limit token bucket).
+// Redis hash field names for a session sticky binding.
 const (
 	redisFieldModelServer = "modelServer"
 	redisFieldPod         = "pod"
 )
 
-// Binding pins a session to a ModelServer (same-namespace name) and Pod.
+// Binding is the stored affinity target: ModelServer short name (same
+// namespace as the ModelRoute) and the selected Pod name.
 type Binding struct {
 	ModelServer string
 	Pod         string
