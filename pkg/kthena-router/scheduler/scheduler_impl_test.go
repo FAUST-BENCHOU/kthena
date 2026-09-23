@@ -261,6 +261,65 @@ func TestSchedulePDGroup(t *testing.T) {
 	}
 }
 
+func TestSchedulePDGroupPrefersStickyPair(t *testing.T) {
+	store := datastore.New()
+	modelServerName := types.NamespacedName{Namespace: "default", Name: "test-model-server"}
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Name: modelServerName.Name, Namespace: modelServerName.Namespace},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				PDGroup: &aiv1alpha1.PDGroup{
+					GroupKey:      "pd-group",
+					DecodeLabels:  map[string]string{"role": "decode"},
+					PrefillLabels: map[string]string{"role": "prefill"},
+				},
+			},
+		},
+	}
+	require.NoError(t, store.AddOrUpdateModelServer(modelServer, nil))
+
+	for _, pod := range []*corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "decode-a", Namespace: "default",
+				Labels: map[string]string{"pd-group": "group-a", "role": "decode"}},
+			Status: corev1.PodStatus{PodIP: "10.0.0.1"},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "prefill-a", Namespace: "default",
+				Labels: map[string]string{"pd-group": "group-a", "role": "prefill"}},
+			Status: corev1.PodStatus{PodIP: "10.0.0.2"},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "decode-b", Namespace: "default",
+				Labels: map[string]string{"pd-group": "group-b", "role": "decode"}},
+			Status: corev1.PodStatus{PodIP: "10.0.0.3"},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "prefill-b", Namespace: "default",
+				Labels: map[string]string{"pd-group": "group-b", "role": "prefill"}},
+			Status: corev1.PodStatus{PodIP: "10.0.0.4"},
+		},
+	} {
+		require.NoError(t, store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer}))
+	}
+
+	scheduler := NewScheduler(store, nil).(*SchedulerImpl)
+	ctx := &framework.Context{
+		Prompt:               &common.ChatMessage{},
+		ModelServerName:      modelServerName,
+		PDGroup:              modelServer.Spec.WorkloadSelector.PDGroup,
+		StickyPodName:        "decode-b",
+		StickyPrefillPodName: "prefill-b",
+	}
+	pods, err := store.GetPodsByModelServer(modelServerName)
+	require.NoError(t, err)
+	require.NoError(t, scheduler.Schedule(ctx, pods))
+	require.NotEmpty(t, ctx.DecodePods)
+	require.NotEmpty(t, ctx.PrefillPods)
+	require.Equal(t, "decode-b", ctx.DecodePods[0].Pod.Name)
+	require.Equal(t, "prefill-b", ctx.PrefillPods[0].Pod.Name)
+}
+
 // TestScheduleNonPDGroupWithEmptyScores tests non-PD scheduling with empty scores
 func TestScheduleNonPDGroupWithEmptyScores(t *testing.T) {
 	store := datastore.New()

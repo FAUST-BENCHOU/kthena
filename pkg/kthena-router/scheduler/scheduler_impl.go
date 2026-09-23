@@ -18,6 +18,7 @@ package scheduler
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -145,15 +146,35 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 			return err
 		}
 
+		var decodeCandidates []*datastore.PodInfo
+		var prefillCandidates []*datastore.PodInfo
+		if ctx.StickyPodName != "" && ctx.StickyPrefillPodName != "" {
+			stickyDecodeIndex := slices.IndexFunc(decodePods, func(pod *datastore.PodInfo) bool {
+				return pod != nil && pod.Pod != nil && pod.Pod.Name == ctx.StickyPodName
+			})
+			if stickyDecodeIndex >= 0 {
+				stickyDecode := decodePods[stickyDecodeIndex]
+				stickyPrefillPods, stickyErr := s.store.GetPrefillPodsForDecodeGroup(
+					ctx.ModelServerName, stickyDecode.GetPodNamespacedName())
+				if stickyErr == nil {
+					stickyPrefillPods, stickyErr = s.RunFilterPlugins(stickyPrefillPods, ctx)
+				}
+				stickyPrefillIndex := slices.IndexFunc(stickyPrefillPods, func(pod *datastore.PodInfo) bool {
+					return pod != nil && pod.Pod != nil && pod.Pod.Name == ctx.StickyPrefillPodName
+				})
+				if stickyErr == nil && stickyPrefillIndex >= 0 {
+					decodeCandidates = append(decodeCandidates, stickyDecode)
+					prefillCandidates = append(prefillCandidates, stickyPrefillPods[stickyPrefillIndex])
+					decodePods = slices.Delete(decodePods, stickyDecodeIndex, stickyDecodeIndex+1)
+				}
+			}
+		}
+
 		klog.V(4).Info("Running score plugins for decode pod")
 		scores := s.RunScorePlugins(decodePods, ctx)
+		topNDecodePods := TopNPodInfos(scores, topN-len(decodeCandidates))
 
-		topNDecodePods := TopNPodInfos(scores, topN)
-		ctx.DecodePods = topNDecodePods
-		prefillPods := make([]*datastore.PodInfo, len(topNDecodePods))
-		validPairs := 0
-
-		for i, decodePod := range ctx.DecodePods {
+		for _, decodePod := range topNDecodePods {
 			decodePodName := decodePod.GetPodNamespacedName()
 			if decodePodName.Name == "" {
 				continue
@@ -179,11 +200,12 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 					"decode instance", decodePodName)
 				continue
 			}
-			prefillPods[i] = bestPrefillPod[0]
-			validPairs++
+			decodeCandidates = append(decodeCandidates, decodePod)
+			prefillCandidates = append(prefillCandidates, bestPrefillPod[0])
 		}
-		ctx.PrefillPods = prefillPods
-		if validPairs == 0 {
+		ctx.DecodePods = decodeCandidates
+		ctx.PrefillPods = prefillCandidates
+		if len(decodeCandidates) == 0 {
 			return fmt.Errorf("no valid prefill-decode pod pairs found")
 		}
 
