@@ -2126,8 +2126,10 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 		modelServing.Name = pdServingName
 		modelServing.Namespace = testNamespace
 		for i := range modelServing.Spec.Template.Roles {
-			modelServing.Spec.Template.Roles[i].Replicas = ptr.To[int32](2)
-			modelServing.Spec.Template.Roles[i].EntryTemplate.Metadata.Labels["app"] = pdServingName
+			role := &modelServing.Spec.Template.Roles[i]
+			role.Replicas = ptr.To[int32](2)
+			delete(role.EntryTemplate.Metadata.Labels, workloadv1alpha1.GroupNameLabelKey)
+			role.EntryTemplate.Metadata.Labels["app"] = pdServingName
 		}
 		_, err = testCtx.KthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 		require.NoError(t, err)
@@ -2139,7 +2141,7 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 		modelServer := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](filepath.Join(routercontext.TestDataDir, "ModelServer-ds1.5b-pd-disaggregation.yaml"))
 		modelServer.Name = pdModelServerName
 		modelServer.Namespace = testNamespace
-		modelServer.Spec.WorkloadSelector.MatchLabels["app"] = pdServingName
+		modelServer.Spec.WorkloadSelector.MatchLabels = map[string]string{"app": pdServingName}
 		if modelServer.Spec.TrafficPolicy == nil {
 			modelServer.Spec.TrafficPolicy = &networkingv1alpha1.TrafficPolicy{}
 		}
