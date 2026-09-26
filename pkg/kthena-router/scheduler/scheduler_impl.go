@@ -148,31 +148,42 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 
 		var decodeCandidates []*datastore.PodInfo
 		var prefillCandidates []*datastore.PodInfo
+		// PD session sticky: pin a complete Prefill/Decode pair, then skip Score
+		// (same as aggregated sticky). Half a pair is never preferred.
+		// 1. Require both sticky names; otherwise fall through to normal scoring.
 		if ctx.StickyPodName != "" && ctx.StickyPrefillPodName != "" {
+			// 2. Sticky decode must still be in the filtered decode list.
 			stickyDecodeIndex := slices.IndexFunc(decodePods, func(pod *datastore.PodInfo) bool {
 				return pod != nil && pod.Pod != nil && pod.Pod.Name == ctx.StickyPodName
 			})
 			if stickyDecodeIndex >= 0 {
 				stickyDecode := decodePods[stickyDecodeIndex]
+				// 3. Load prefills in the same PD group as that decode, then Filter them.
 				stickyPrefillPods, stickyErr := s.store.GetPrefillPodsForDecodeGroup(
 					ctx.ModelServerName, stickyDecode.GetPodNamespacedName())
 				if stickyErr == nil {
 					stickyPrefillPods, stickyErr = s.RunFilterPlugins(stickyPrefillPods, ctx)
 				}
+				// 4. Sticky prefill must still be selectable in that group.
 				stickyPrefillIndex := slices.IndexFunc(stickyPrefillPods, func(pod *datastore.PodInfo) bool {
 					return pod != nil && pod.Pod != nil && pod.Pod.Name == ctx.StickyPrefillPodName
 				})
 				if stickyErr == nil && stickyPrefillIndex >= 0 {
-					decodeCandidates = append(decodeCandidates, stickyDecode)
-					prefillCandidates = append(prefillCandidates, stickyPrefillPods[stickyPrefillIndex])
-					decodePods = slices.Delete(decodePods, stickyDecodeIndex, stickyDecodeIndex+1)
+					// 5. Both sides OK: pin only this pair and return (no Score, no topN fill).
+					ctx.DecodePods = []*datastore.PodInfo{stickyDecode}
+					ctx.PrefillPods = []*datastore.PodInfo{stickyPrefillPods[stickyPrefillIndex]}
+					return nil
 				}
 			}
+			// 6. Sticky miss (decode gone, prefill filtered, or group mismatch):
+			// clear names and score new pairs normally.
+			ctx.StickyPodName = ""
+			ctx.StickyPrefillPodName = ""
 		}
 
 		klog.V(4).Info("Running score plugins for decode pod")
 		scores := s.RunScorePlugins(decodePods, ctx)
-		topNDecodePods := TopNPodInfos(scores, topN-len(decodeCandidates))
+		topNDecodePods := TopNPodInfos(scores, topN)
 
 		for _, decodePod := range topNDecodePods {
 			decodePodName := decodePod.GetPodNamespacedName()

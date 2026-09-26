@@ -43,7 +43,7 @@ Kubernetes Service `sessionAffinity: ClientIP` only keys on **source IP**. Affin
 #### Non-goals (this version)
 
 - Pinning a session across **multiple ModelServers**. Weighted / canary selection on `ModelRoute` stays independent of sticky.
-- Choosing a different PD pair solely for KV-cache scoring when the bound pair remains selectable. Pair stickiness is the first scheduling constraint; normal scoring applies when no valid binding exists.
+- Choosing a different PD pair solely for KV-cache scoring when the bound pair remains selectable. A valid bound pair is pinned and Score is skipped; normal scoring applies only when no valid binding exists.
 
 ### Proposal
 
@@ -65,7 +65,13 @@ Session sticky is **not** a scheduler plugin. It looks up a binding before `Sche
 2. If the chosen `ModelServer` has `trafficPolicy.sessionSticky`, take the first non-empty source (`Header` / `Query` / `Cookie` / `JWTClaim`) as the session key. Empty key: skip sticky.
 3. `Get` binding keyed by **ModelServer identity + session key**. If present, pass the bound Pod or complete PD pair into `Schedule`.
 4. `Schedule` (aggregated, non-PD): Filter runs. If `StickyPodName` is still in the list, `BestPods` is that Pod and Score is skipped. Otherwise the pin is cleared and Score runs.
-5. `Schedule` (PD): validate that both bound Pods are selectable and belong to the same PD group. If so, put that pair first in the candidate list. If either Pod is unavailable or filtered out, clear the binding and schedule new pairs normally.
+5. `Schedule` (PD sticky): same pin-and-skip-Score rule as aggregated, but for a complete pair:
+   1. Require both sticky Decode and Prefill names; a half pair is never preferred.
+   2. Sticky Decode must remain in the filtered decode list.
+   3. Load Prefills in that Decode's PD group and run Filter on them.
+   4. Sticky Prefill must still be selectable in that group.
+   5. Both sides OK → set `DecodePods`/`PrefillPods` to that pair only and return (no Score, no topN fill).
+   6. Otherwise clear sticky names and score new pairs normally.
 6. `Commit` the selected backend with the ModelServer TTL (store details below), then proxy the request using the existing retry behavior.
 
 **How this interacts with other scheduling factors**
@@ -75,7 +81,7 @@ Session sticky is **not** a scheduler plugin. It looks up a binding before `Sche
 | Sticky Pod **survives Filter** | `BestPods` is that Pod. Score plugins are skipped. |
 | Sticky Pod **fails Filter** (overloaded, gone, …) | Pin is dropped. Score ranks the remaining Pods as usual. The new winner is committed. |
 | No binding / empty session key | Filter then Score as today. The selected Pod or pair is committed if a key exists. |
-| **PD** (`PDGroup` set) | Sticky binds the complete Prefill/Decode pair. A valid pair is preferred as a unit; if either side is unavailable, the binding is cleared and a new pair is selected. |
+| **PD** (`PDGroup` set) | Sticky binds the complete Prefill/Decode pair. A valid pair is pinned as a unit and Score is skipped; if either side is unavailable, the binding is cleared and a new pair is scored. |
 | **Multi-target ModelRoute** | Each request still follows weights. Sticky for ModelServer A never forces traffic onto A when the route selected B. |
 
 #### Session map storage
@@ -177,7 +183,7 @@ Header names are case-insensitive; Cookie names are case-sensitive.
 
 - Session key extraction: Header, Query; source ordering; nil `sessionSticky`; all sources empty.
 - In-memory store Set/Get/Commit with TTL; Redis commit does not overwrite a different winner; PD bindings require a valid Prefill/Decode pair.
-- PD scheduling prefers a valid bound pair and rejects a pair when either side is unavailable or belongs to a different PD group.
+- PD scheduling pins a valid bound pair (skips Score) and rejects a pair when either side is unavailable or belongs to a different PD group. A half pair is never preferred.
 
 #### End-to-end acceptance (`test/e2e/router/`)
 
