@@ -263,16 +263,16 @@ func TestSchedulePDGroup(t *testing.T) {
 
 func TestSchedulePDGroupStickyPair(t *testing.T) {
 	type stickyCase struct {
-		name                 string
-		stickyDecode         string
-		stickyPrefill        string
-		overloadDecode       string // RequestWaitingNum above filter threshold
-		overloadPrefill      string
-		deletePrefill        string // remove from store before Schedule
-		wantDecode           string
-		wantPrefill          string
-		wantStickyCleared    bool
-		wantSingleCandidate  bool
+		name                string
+		stickyDecode        string
+		stickyPrefill       string
+		overloadDecode      string // RequestWaitingNum above filter threshold
+		overloadPrefill     string
+		deletePrefill       string // remove from store before Schedule
+		wantDecode          string
+		wantPrefill         string
+		wantStickyCleared   bool
+		wantSingleCandidate bool
 	}
 
 	tests := []stickyCase{
